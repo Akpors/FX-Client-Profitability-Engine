@@ -62,6 +62,11 @@ pairs:
 #   base_markup_bps           one-sided markup by pair liquidity tier, for a 100k-500k EUR ticket
 #                             (the reference band, multiplier 1.0) before discounts and noise
 #   markup_noise_sigma        sigma of the lognormal noise on each trade's markup
+#   client_markup_sigma       sigma of each client's lognormal NEGOTIATION FACTOR, drawn once per
+#                             client (median 1.0): the price the relationship banker agreed, its
+#                             price sensitivity and history, beyond what tier and ticket explain.
+#                             Bilateral corporate deals scatter most; rate-card SME pricing and
+#                             competitive electronic or panel flow scatter least
 #   compression_per_year      markup x exp(-rate x years since window start); competitive pressure
 #   adverse_selection_bps     [mean, sd] of dealer cover slippage vs mid. POSITIVE = WORSE FOR THE
 #                             DEALER. The mean can be any sign; the sd cannot be negative
@@ -83,6 +88,7 @@ segments:
     buy_probability: 0.52
     base_markup_bps: {g10_major: 3.5, g10_minor: 6.0, cee: 11.0, em: 18.0}
     markup_noise_sigma: 0.20
+    client_markup_sigma: 0.30  # bilateral deals: similar treasuries pay quite different prices
     compression_per_year: 0.05
     adverse_selection_bps: [0.10, 0.40]
     ops_cost_per_ticket_eur: 9.0
@@ -100,6 +106,7 @@ segments:
     buy_probability: 0.50
     base_markup_bps: {g10_major: 6.0, g10_minor: 10.0, cee: 18.0, em: 30.0}
     markup_noise_sigma: 0.25
+    client_markup_sigma: 0.25  # sales-negotiated deal by deal, but closer to a price schedule
     compression_per_year: 0.03
     adverse_selection_bps: [0.05, 0.30]
     ops_cost_per_ticket_eur: 12.0
@@ -119,6 +126,7 @@ segments:
     buy_probability: 0.48
     base_markup_bps: {g10_major: 12.0, g10_minor: 19.0, cee: 32.0, em: 48.0}
     markup_noise_sigma: 0.30
+    client_markup_sigma: 0.20  # rate card, rarely renegotiated: little room to differ
     compression_per_year: 0.0
     adverse_selection_bps: [0.02, 0.20]
     ops_cost_per_ticket_eur: 15.0
@@ -137,6 +145,7 @@ segments:
     buy_probability: 0.50
     base_markup_bps: {g10_major: 2.0, g10_minor: 3.5, cee: 7.0, em: 12.0}
     markup_noise_sigma: 0.20
+    client_markup_sigma: 0.20  # several banks on the panel keep prices close to each other
     compression_per_year: 0.06
     adverse_selection_bps: [0.20, 0.50]
     ops_cost_per_ticket_eur: 10.0
@@ -156,6 +165,7 @@ segments:
     buy_probability: 0.50
     base_markup_bps: {g10_major: 1.0, g10_minor: 1.8, cee: 3.5, em: 6.0}
     markup_noise_sigma: 0.15
+    client_markup_sigma: 0.20  # electronic and multi-dealer, but each fund has its own deal
     compression_per_year: 0.18
     adverse_selection_bps: [0.30, 0.80]
     ops_cost_per_ticket_eur: 2.5
@@ -175,6 +185,7 @@ segments:
     buy_probability: 0.42
     base_markup_bps: {g10_major: 3.0, g10_minor: 5.5, cee: 10.0, em: 17.0}
     markup_noise_sigma: 0.15
+    client_markup_sigma: 0.20  # platform pricing schedules, negotiated contract by contract
     compression_per_year: 0.12
     adverse_selection_bps: [0.05, 0.30]
     ops_cost_per_ticket_eur: 1.8

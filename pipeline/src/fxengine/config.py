@@ -70,6 +70,8 @@ class SegmentConfig(_Model):
     buy_probability: Annotated[float, Field(gt=0, lt=1)]  # P(client buys EUR)
     base_markup_bps: dict[LiquidityTier, NonNegative]  # at the reference ticket band
     markup_noise_sigma: NonNegative  # sigma of the lognormal noise on each trade's markup
+    # sigma of each client's lognormal negotiation factor, drawn once per client (median 1.0)
+    client_markup_sigma: NonNegative
     compression_per_year: NonNegative  # markup shrinks by exp(-rate x years)
     adverse_selection_bps: tuple[float, NonNegative]  # (mean, sd) of cover slippage vs mid
     ops_cost_per_ticket_eur: NonNegative
@@ -136,7 +138,7 @@ class ClientBookConfig(_Model):
     # popularity normalised to sum to 1. Higher means clients hug the segment average.
     pair_concentration: Positive = 30.0
     # Between-client standard deviation of ln(median ticket) around the segment's ticket mu.
-    ticket_mu_sd: NonNegative = 0.5
+    ticket_mu_sd: NonNegative = 0.7
 
 
 class GeneratorConfig(_Model):
@@ -160,8 +162,13 @@ class GeneratorConfig(_Model):
         opens, closes = self.trading_hours_utc
         if not opens < closes:
             raise ValueError("trading_hours_utc must open before it closes")
-        if not opens <= self.fix_time_utc <= closes:
-            raise ValueError("fix_time_utc must fall inside trading_hours_utc")
+        # The trading day is half-open [open, close), as in market.trading_grid, so a fix
+        # exactly at the close is outside it.
+        if not opens <= self.fix_time_utc < closes:
+            raise ValueError(
+                "fix_time_utc must fall inside the half-open trading day [open, close) "
+                "of trading_hours_utc"
+            )
         return self
 
     @model_validator(mode="after")

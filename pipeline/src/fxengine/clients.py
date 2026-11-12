@@ -1,11 +1,14 @@
 """The synthetic client book: who the dealer's clients are and how they behave.
 
 Each client gets a segment, a home country, an onboarding date, a trade frequency, a ticket-size
-distribution, a preferred-pair profile and a pricing history flag (``legacy_deal``). Nothing
-here prices a trade. The client's *expected annual EUR volume* and the volume tier it earns are
-fixed up front, so a later trade-generation step can price each trade from the client's tier the
-way a dealer's pricing grid would, and the volume-versus-margin pattern emerges from that grid
-rather than being assigned to particular clients.
+distribution, a preferred-pair profile, a pricing history flag (``legacy_deal``) and a
+``negotiation_factor``: the client's own price level relative to the dealer's grid, the outcome
+of negotiation, relationship and price sensitivity. Nothing here prices a trade. The client's
+*expected annual EUR volume* and the volume tier it earns are fixed up front, so
+``fxengine.trades`` can price each trade from the client's tier the way a dealer's pricing grid
+would, and the volume-versus-margin pattern emerges from that grid rather than being assigned
+to particular clients. The negotiation factor is independent of size: it scatters clients
+around the grid without pushing the pattern in either direction.
 
 All randomness comes from the ``numpy.random.Generator`` passed in.
 """
@@ -53,6 +56,7 @@ COLUMNS = [
     "pair_weights",
     "expected_annual_volume_eur",
     "volume_tier_discount_pct",
+    "negotiation_factor",
 ]
 
 
@@ -160,6 +164,13 @@ def generate_clients(
         )
 
     clients = pd.concat(frames, ignore_index=True)
+
+    # Drawn last, in one call over the whole book, so adding it left every earlier column of a
+    # seeded book unchanged. LogNormal(0, sigma): median 1.0, a client-specific multiplier on
+    # the markup the grid would otherwise give.
+    sigma = clients["segment"].map(lambda name: cfg.segments[name].client_markup_sigma)
+    clients["negotiation_factor"] = rng.lognormal(0.0, sigma.to_numpy(dtype=float))
+
     number = clients.groupby("segment", sort=False).cumcount() + 1
     prefix = clients["segment"].map(SEGMENT_PREFIX)
     clients["client_id"] = prefix + "-" + number.astype(str).str.zfill(3)

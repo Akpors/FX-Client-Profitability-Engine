@@ -26,6 +26,7 @@ COLUMNS = [
     "pair_weights",
     "expected_annual_volume_eur",
     "volume_tier_discount_pct",
+    "negotiation_factor",
 ]
 
 
@@ -174,8 +175,8 @@ def test_defaults_let_the_volume_discount_emerge(cfg: GeneratorConfig, clients: 
     """A client-level proxy for Task 5's Spearman check, before any trade is generated.
 
     Expected G10-major markup = base x ticket-band multiplier (at the client's median ticket)
-    x (1 - volume-tier discount) x (1 - legacy discount if flagged). Noise and compression are
-    left out: they add scatter, not direction.
+    x (1 - volume-tier discount) x (1 - legacy discount if flagged) x negotiation factor. Noise
+    and compression are left out: they add scatter, not direction.
     """
     maxima = [
         math.inf if b.max_ticket_eur is None else b.max_ticket_eur for b in cfg.ticket_bands
@@ -188,8 +189,36 @@ def test_defaults_let_the_volume_discount_emerge(cfg: GeneratorConfig, clients: 
     base = clients["segment"].map(lambda s: cfg.segments[s].base_markup_bps["g10_major"])
     band = clients["ticket_mu"].map(lambda mu: band_multiplier(math.exp(mu)))
     legacy = np.where(clients["legacy_deal"], 1 - cfg.legacy_deal.discount_pct, 1.0)
-    markup = base * band * (1 - clients["volume_tier_discount_pct"]) * legacy
+    negotiated = clients["negotiation_factor"]
+    markup = base * band * (1 - clients["volume_tier_discount_pct"]) * legacy * negotiated
 
     # Spearman = Pearson on ranks. (pandas' method="spearman" needs scipy, which is not installed.)
     rho = clients["expected_annual_volume_eur"].rank().corr(markup.rank())
     assert rho < -0.5, rho
+
+
+def test_negotiation_factor_is_per_client_lognormal(cfg: GeneratorConfig, clients: pd.DataFrame):
+    factor = clients["negotiation_factor"]
+    assert factor.gt(0).all()
+    assert factor.nunique() == len(clients)
+    # LogNormal(0, sigma): the log is centred on zero with the segment's sigma.
+    log_factor = np.log(factor)
+    assert abs(log_factor.mean()) < 0.06
+    for name, group in log_factor.groupby(clients["segment"]):
+        sigma = cfg.segments[name].client_markup_sigma
+        assert 0.5 * sigma < group.std() < 1.6 * sigma, name
+
+
+def test_negotiation_draw_comes_last(cfg: GeneratorConfig, clients: pd.DataFrame):
+    """The factor is drawn after everything else, so switching it off leaves every other column
+    exactly as it was, and the factor is then exactly 1."""
+    flat = {
+        name: seg.model_copy(update={"client_markup_sigma": 0.0})
+        for name, seg in cfg.segments.items()
+    }
+    plain = generate_clients(
+        cfg.model_copy(update={"segments": flat}), WINDOW, np.random.default_rng(42)
+    )
+    others = [col for col in COLUMNS if col != "negotiation_factor"]
+    pd.testing.assert_frame_equal(plain[others], clients[others])
+    assert (plain["negotiation_factor"] == 1.0).all()

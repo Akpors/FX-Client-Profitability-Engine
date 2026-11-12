@@ -50,6 +50,7 @@ The mix gives a skew that real desks recognise. At seed 42, hedge funds and paym
 | `pair_weights` | See 1.6. |
 | `expected_annual_volume_eur` | See 1.3. |
 | `volume_tier_discount_pct` | See 1.3. |
+| `negotiation_factor` | The client's own price level relative to the dealer's grid, `LogNormal(0, client_markup_sigma)` with the segment's sigma, drawn once per client. See 1.4. |
 
 All `*_lognorm` parameters are the `(mu, sigma)` of the underlying normal distribution, not the mean and standard deviation of the lognormal. A trade frequency of `(2.899, 0.8)` therefore has a median of `exp(2.899)` = 18 a month and a mean of `exp(2.899 + 0.8^2 / 2)` = 25. Clients within a segment differ a lot: the frequency and ticket sizes are skewed, so a few clients are much larger than the typical one. That skew is realistic and it matters later, because it makes the biggest clients a visible minority.
 
@@ -76,11 +77,44 @@ A dealer prices volume with a tier grid: the more a client trades with the desk,
 
 Discounts are stored as fractions (0.12, not 12) in the field called `discount_pct`. The tier is a property of the client's size, not of its segment, so the same ladder applies to everyone. An SME never reaches a tier above zero because its volume is too small, and at seed 42 no hedge fund sits in the bottom three tiers because their volumes are too large. Within a segment the tier still varies: mid-market clients span the bottom three tiers, large corporates the middle three.
 
-This grid is the main reason big clients pay less. Together with the ticket bands (large tickets are priced tighter), which apply to each trade's notional and are documented with pricing, it makes the relationship between volume and markup something the pricing rules produce rather than something written into the data.
+This grid is the main reason big clients pay less. Together with the ticket bands (large tickets are priced tighter), which apply to each trade's notional and are documented with pricing (section 3), it makes the relationship between volume and markup something the pricing rules produce rather than something written into the data.
 
-### 1.4 Why the relationship is not simply built in
+### 1.4 The negotiation factor, and why the relationship is not simply built in
 
-A check on the defaults shows the structure. Ranking all 200 clients by expected annual volume against their expected G10-major markup (base markup x ticket band x volume tier x legacy discount, as the pricing stage will apply them), the Spearman correlation is about -0.9. A client-level test in the repo pins that this holds before any trade exists. Most of it comes from the pricing ladder between segments (a hedge fund is priced tighter than an SME, as on any desk), which would be there whatever the tiers did. The part the tiers and ticket bands add shows up within each segment. In a prototype of the pricing formula run for this task, with the tiers and bands switched off, a segment's bigger clients are no cheaper than its smaller ones (correlation near zero); with them on, the within-segment correlation is about -0.4 to -0.8 depending on the segment. So bigger clients within the same segment do get tighter pricing, through the grid, and not because anyone decided they should.
+Two clients in the same segment, of the same size and in the same volume tier, rarely pay the same price. One treasurer negotiated hard when the relationship was set up, another never asked; one runs a competitive tender every year, another values the coverage banker's time. Spec section 5.3 calls this the client's negotiated spread level and price sensitivity. The generator gives each client a `negotiation_factor`, a multiplier on every markup that client pays:
+
+```
+negotiation_factor ~ LogNormal(0, client_markup_sigma)       one draw per client, fixed for the window
+```
+
+Its median is 1.0, so it moves clients around the grid without moving the grid. The sigma is set per segment and reflects how bilateral that segment's pricing is:
+
+| Segment | `client_markup_sigma` | Why |
+|---|---|---|
+| Large corporate | 0.30 | Bilateral deals agreed with a coverage banker: similar treasuries can pay quite different prices. |
+| Mid-market | 0.25 | Sales-negotiated deal by deal, but closer to a price schedule. |
+| SME | 0.20 | Rate-card pricing, rarely renegotiated, so little room to differ. |
+| Asset manager | 0.20 | Several banks on the panel keep prices close to each other. |
+| Hedge fund | 0.20 | Electronic and multi-dealer, though each fund has its own deal. |
+| Payment institution | 0.20 | Platform pricing schedules, negotiated contract by contract. |
+
+A sigma of 0.30 means about two clients in three sit within a factor of 1.35 of the grid price (exp(0.30) = 1.35), and one in twenty pays more than 1.8 times or less than 0.55 times it. The factor is independent of the client's size, segment ladder, tier and legacy flag, so it cannot create the volume-versus-margin pattern; it can only blur it. It is drawn after every other client attribute, in one call over the whole book, so switching it off (sigma 0, factor exactly 1) leaves every other column unchanged. A test pins that.
+
+**What the generated book shows.** For each client, take its realised annual EUR volume (traded notional over the window divided by the years it was active) and its median markup on the G10 majors (EURUSD, EURGBP, EURJPY, EURCHF). Over the 298,178 trades generated at seed 42:
+
+| Spearman, volume against G10-major markup | All 200 clients | Large corp. | Mid-market | SME | Asset mgr | Hedge fund | Payment inst. |
+|---|---|---|---|---|---|---|---|
+| Shipped defaults | -0.91 | -0.20 | -0.20 | -0.10 | -0.73 | -0.44 | -0.49 |
+| Negotiation factor off (sigma 0) | -0.93 | -0.55 | -0.48 | -0.22 | -0.83 | -0.75 | -0.59 |
+| Volume tiers and ticket bands off | -0.87 | +0.06 | +0.12 | -0.01 | -0.34 | +0.16 | -0.24 |
+
+Three things follow.
+
+- **Across the whole book the correlation is about -0.9, and the segment ladder supplies most of it.** A hedge fund is priced tighter than an SME on any desk, whatever the tiers do: with tiers and bands switched off the book-wide figure is still -0.87. That part is market structure, not a finding, and the analysis should not present it as one.
+- **Within a segment, the grid is what makes bigger clients cheaper.** With the tiers and ticket bands off, the within-segment correlations scatter around zero (from -0.34 to +0.16, the noise of 16 to 64 clients). With them on, every segment is negative. So a segment's bigger clients pay less because the grid gives volume a discount, not because anyone labelled them.
+- **The negotiation factor makes the within-segment pattern look like real data.** Without it, the within-segment correlations run to -0.83, too tidy for a book where every price was negotiated. With it they run from -0.10 to -0.73 at seed 42. Across 20 seeds (42 to 61) the averages are -0.28 for large corporates, -0.35 for mid-market, -0.23 for SMEs, -0.42 for asset managers, -0.55 for hedge funds and -0.42 for payment institutions. Seed 42 is on the weak side for the two corporate segments. SMEs show the least because they all sit in the bottom volume tier and only the ticket bands separate them.
+
+The client-level test in the repo checks a proxy before any trade exists (expected volume against base x band at the median ticket x tier x legacy x negotiation factor) and requires a correlation below -0.5. The trade-level test requires below -0.3 on the generated book.
 
 ### 1.5 Onboarding and legacy deals
 
@@ -114,14 +148,14 @@ The expected total, with the means from 1.1:
 | Payment institution | 30 | 255 | 7,650 |
 | **Book** | **200** | | **13,910** |
 
-Not every client is active for all 24 months. Of each segment, 80% are active for 24 months and 20% for 12 months on average, so a client is active for 0.8 x 24 + 0.2 x 12 = 21.6 months on average. Expected trades are therefore 13,910 x 21.6, about 300,000, which is 69.6 trades per active client-month, or 62.6 per client-month across all 24 months. At seed 42 the drawn clients give an expected 298,900 trades (99.6% of target) on the 509 business days in the window. The Poisson noise on top is a few hundred trades.
+Not every client is active for all 24 months. Of each segment, 80% are active for 24 months and 20% for 12 months on average, so a client is active for 0.8 x 24 + 0.2 x 12 = 21.6 months on average. Expected trades are therefore 13,910 x 21.6, about 300,000, which is 69.6 trades per active client-month, or 62.6 per client-month across all 24 months. At seed 42 the drawn clients give an expected 298,900 trades (99.6% of target) on the 509 business days in the window. The Poisson noise on top is a few hundred trades: the generated book (section 3) has 298,178.
 
 That total is sensitive to the draw of a few busy clients. Across 200 different client-book seeds the expected total averages about 302,000 with a spread of about 11%, and 97% of the seeds land within 20% of the target. Seed 42 lands very close. Changing any frequency in the config moves the total in proportion; the parameter sheet shows both the inputs and the resulting expected count.
 
 ### 1.8 What the client book simplifies
 
-- A client's frequency, ticket distribution and pair mix are fixed for the whole window. Real clients grow, shrink and shift. Change over time enters only through spread compression and onboarding, in the pricing stage.
-- Client-level pricing differences come from volume tier, ticket size and legacy deals. A real desk also prices by negotiation, relationship and mood. That scatter is absent, which makes the volume-markup relationship tidier than it would be in real data.
+- A client's frequency, ticket distribution and pair mix are fixed for the whole window. Real clients grow, shrink and shift. Change over time enters only through spread compression and onboarding (section 3).
+- Client-level pricing differences come from volume tier, ticket size, legacy deals and one negotiation factor per client. A real client's price level also drifts with the relationship, a tender or a new banker; here the factor is fixed for the whole window, and it is independent of everything else about the client (a real price-sensitive client might also be the one that splits its flow across more banks).
 - Home country is decorative. It does not influence the pairs a client trades.
 - No client leaves. A client who is repriced and walks away is what the pricing recommendation later reasons about with explicit assumptions.
 - Clients are independent. Real flow is correlated (month-end hedging, central-bank days).
@@ -232,7 +266,7 @@ The ECB fix is the benchmark the later analysis uses (see [the benchmark note](b
 
 - **The mid-to-benchmark distance is small by construction around 13:10 UTC.** At the fix it is exactly zero. Thirty minutes either side the noise has a standard deviation of about 10 bps on EURUSD (a minute's worth is about 1.9 bps; the bridge scales with the square root of the minutes from the fix), and it grows towards the middle of each segment. In real markets the ECB fix comes from a procedure of its own, is rounded to a few significant figures and is not itself a traded price, so the live mid at 14:10 CET differs from it by a small amount that nothing pins. Here that difference is zero at 13:10 by construction.
 - **A trade-versus-benchmark gap is therefore a blend of two things here.** One is the markup the dealer charged. The other is how far the synthetic mid happened to be from the fix at that minute. For a trade close to the fix the second is tiny, so the gap looks like the markup. For a trade early in the day it can be large, and the sign is random. Over many trades the random part averages out, but a reader comparing one small group of trades against the benchmark should expect noise that comes from this stage, not from the dealer's pricing.
-- **The generator measures its own markups from the mid, not from the benchmark.** `markup_bps_applied` (see the pricing stage) is relative to the mid, and the benchmark rate is carried alongside it as a separate column. Where the analysis uses the benchmark, the mid-to-fix distance described above is part of what it is measuring.
+- **The generator measures its own markups from the mid, not from the benchmark.** `markup_bps_applied` (section 3.5) is relative to the mid, and the benchmark rate is carried alongside it as a separate column. Where the analysis uses the benchmark, the mid-to-fix distance described above is part of what it is measuring.
 
 None of this says the ECB fix is a bad benchmark. It is a published reference, and the analysis is built on it for that reason. It says that in this dataset the mid and the benchmark are linked by design, which real desks do not see.
 
@@ -242,8 +276,140 @@ None of this says the ECB fix is a bad benchmark. It is a published reference, a
 - **Variance is concentrated in the trading day.** All of a day's variance is spread across the 540 trading minutes and none is placed overnight, so the per-minute volatility is about 1.6 times what it would be if the same daily variance were spread over 24 hours. Intraday noise is a little rougher than a 24-hour spread would imply.
 - **Currencies are independent.** Each pair's path is drawn without reference to the others, so EURUSD and EURGBP can move in opposite directions on a day when, in reality, both would follow the dollar.
 - **One fixed fix time all year**, as covered in 2.5.
-- **The mid is a single price.** There is no bid and no ask here, so the spread a client pays is the markup applied to the mid in the pricing stage, with nothing in the market price standing for the touch.
+- **The mid is a single price.** There is no bid and no ask here, so the spread a client pays is the markup applied to the mid in the pricing stage (section 3), with nothing in the market price standing for the touch.
 
 ### 2.9 Reproducibility
 
 `simulate_mid_path` uses only the `numpy.random.Generator` it is given. It draws all of a pair's increments in one call, and always draws one fewer than the number of grid points, so the random stream it consumes depends on the grid alone and never on the pair's volatility. The same fixes, grid, volatility and generator state give an identical path.
+
+## 3. Pricing and execution
+
+Code: `fxengine.trades.generate_trades`. Configuration: each segment's `base_markup_bps`, `markup_noise_sigma`, `compression_per_year`, `adverse_selection_bps` and `buy_probability`, plus `ticket_bands`, `volume_tiers` and `legacy_deal` in `generator.yaml`; the client attributes come from section 1.
+
+This stage turns the client book into trades. For each trade it decides when it happens, in which pair, in which direction and for how much, then prices it the way a dealer's pricing grid would and covers it in the market. The output is the `raw.trades` table. At seed 42 on the committed snapshot it holds 298,178 trades over the 509 ECB business days from 1 November 2024 to 30 October 2026.
+
+### 3.1 When and what clients trade
+
+- **Days.** A client trades only on ECB business days inside the window, and only on or after its onboarding date. Its number of trades on each such day is `Poisson(trades_per_month / mean business days per month)`, where the mean is the window's ECB business days divided by its months (509 / 24 = 21.2). Every trade therefore has a same-day ECB fix.
+- **Time.** The timestamp is uniform over the half-open trading day `[07:00, 16:00)` UTC at one-second resolution, so 15:59:59 is possible and 16:00:00 is not. The mid at the trade is the mid at the last grid minute at or before it (section 2).
+- **Pair.** Drawn from the client's own `pair_weights` (section 1.6).
+- **Side.** `client_side` is `BUY` when the client buys EUR, the base currency, and `SELL` when it sells EUR. A client buys with its segment's `buy_probability`. Across the book 45.6% of trades are client BUYs, because SMEs and payment institutions lean to selling EUR.
+- **Ticket.** `LogNormal(ticket_mu, ticket_sigma)` from the client's ticket distribution, rounded to the nearest EUR 1,000, with a floor of EUR 1,000. `notional_base` is that rounded EUR amount, and the ticket band uses it.
+
+### 3.2 The markup
+
+The markup is one-sided, in basis points of the mid, and every factor in it comes from the configuration or the client book:
+
+```
+markup_bps = base_markup_bps[segment][liquidity_tier(pair)]     the segment's price for the pair, at a 100k-500k ticket
+           x markup_multiplier(ticket band of notional_base)     bands are [min, max): EUR 25,000 is in "25k-100k"
+           x (1 - volume_tier_discount_pct)                      the client's volume tier (1.3)
+           x (1 - legacy_deal.discount_pct)    if legacy_deal    an old discount never repriced (1.5)
+           x exp(-compression_per_year x years_since_window_start)
+           x negotiation_factor                                  the client's own level, fixed (1.4)
+           x LogNormal(0, markup_noise_sigma)                    trade-by-trade noise
+```
+
+`years_since_window_start` is `(trade_date - window start) / 365.25` in days. Compression is competitive pressure: the same client is quoted a little tighter each month, faster for electronic flow (hedge funds 18% a year, payment institutions 12%) than for corporates (large 5%, mid-market 3%) and not at all for SMEs on a rate card. The per-trade noise stands for everything a pricing grid does not capture on the day: the salesperson, the size of the morning's queue, the client asking twice.
+
+A worked example. A mid-market client in the 12% volume tier, with no legacy deal and a negotiation factor of 1.10, buys EUR 250,000 against USD one year into the window, at a mid of 1.08500, with neutral noise:
+
+```
+6.0 bps (mid-market, g10_major) x 1.00 (100k-500k) x 0.88 x 1.00 x exp(-0.03 x 1.0) x 1.10 x 1.00 = 5.64 bps
+client_rate = 1.08500 x (1 + 5.64 / 10,000) = 1.0856115, quoted as 1.08561
+```
+
+Median `markup_bps_applied` in the generated book, by segment and liquidity tier:
+
+| Segment | G10 major | G10 minor | CEE | EM |
+|---|---|---|---|---|
+| SME | 17.7 | 27.7 | 47.5 | 73.5 |
+| Mid-market | 6.0 | 10.4 | 17.7 | 30.0 |
+| Payment institution | 3.0 | 5.3 | 10.1 | 17.7 |
+| Large corporate | 2.3 | 4.0 | 7.0 | 11.3 |
+| Asset manager | 1.0 | 1.6 | 3.1 | 6.3 |
+| Hedge fund | 0.4 | 0.7 | 1.5 | 2.4 |
+
+On EURUSD alone the medians are SME 18.0, mid-market 6.0, payment institution 3.0, large corporate 2.3, asset manager 1.0 and hedge fund 0.4 bps.
+
+### 3.3 Client rate, cover rate and the sign convention
+
+With `side_sign = +1` when the client BUYs EUR and `-1` when it SELLs EUR:
+
+```
+client_rate = mid x (1 + side_sign x markup_bps   / 10,000)
+cover_rate  = mid x (1 + side_sign x slippage_bps / 10,000)      slippage_bps ~ Normal(mean, sd) by segment
+```
+
+All rates are quote currency per EUR, like the ECB fix.
+
+- **Client BUY.** The dealer sells EUR to the client above the mid (`client_rate > mid`) and buys the EUR back in the market at `cover_rate`.
+- **Client SELL.** The dealer buys EUR from the client below the mid (`client_rate < mid`) and sells it in the market at `cover_rate`.
+
+**Slippage is signed so that positive is worse for the dealer**, on either side. On a client BUY a positive slippage puts the cover above the mid, so the dealer pays more for the EUR it has just sold; on a client SELL it puts the cover below the mid, so the dealer receives less for the EUR it has just bought. Dealer gross P&L is then
+
+```
+gross_pnl_quote = side_sign x (client_rate - cover_rate) x notional_base
+                = mid x (markup_bps - slippage_bps) / 10,000 x notional_base       (before rounding)
+gross_pnl_eur   = gross_pnl_quote / benchmark_rate
+```
+
+so the dealer keeps the markup minus the slippage. The slippage mean is the segment's adverse selection: how far the market has moved against the dealer by the time it hedges a client's trade. It is largest for hedge funds (mean 0.30 bps, sd 0.80), whose flow is informed and fast, then asset managers (0.20, sd 0.50) whose large rebalancing tickets move the market a little, and close to zero for corporates and SMEs (0.02 to 0.10). The mean may be negative in the configuration (a client whose flow the dealer can cover better than mid); the defaults do not use that.
+
+In the generated book the volume-weighted hedge fund markup is 0.61 bps and the mean slippage 0.30 bps, so the dealer keeps 0.31 bps: adverse selection takes half of what the hedge funds pay. One hedge fund trade in three (35%) loses money before costs, against 6% for asset managers and none to speak of elsewhere. This is the reason a tight markup is not the same thing as a profitable client, and why the analysis measures realised margin against the cover rather than the quoted markup.
+
+### 3.4 Why the high-volume, low-margin pattern emerges
+
+No step in the generator looks at a client's volume and assigns it a margin. The pattern comes out of six ordinary pricing mechanisms, each one something a dealer would recognise:
+
+| Mechanism | What it does | In the generated book |
+|---|---|---|
+| Segment price ladder | Fast, electronic and institutional flow is quoted tighter than corporate and SME flow. | EURUSD median from 18.0 bps (SME) to 0.4 bps (hedge funds). |
+| Volume tiers | A client's expected annual volume earns 0% to 40% off its markup (1.3). | Median client G10-major markup falls tier by tier: 16.4, 5.0, 2.6, 0.93, 0.57 and 0.36 bps. |
+| Ticket bands | Bigger tickets are priced tighter, from x1.80 under EUR 25k to x0.55 at EUR 10m and above. | Mid-market EURUSD median 8.6 bps under 25k, 6.8 at 25k-100k, 5.3 at 100k-500k, 4.5 at 500k-2m. |
+| Legacy deals | 39 existing clients keep an old 25% discount whatever their size today. | Within every segment, legacy clients' median G10-major markup is 71% to 80% of their peers'. |
+| Compression | Markups drift down through the window, fastest for electronic flow. | Hedge fund EURUSD median 0.46 bps in the first quarter, 0.34 in the last (x0.74); SMEs x0.99. |
+| Adverse selection | The busiest, tightest-priced flow is also the hardest to cover. | Hedge funds keep 0.31 of their 0.61 bps markup. |
+
+Under all six sits the negotiation factor (1.4), which scatters clients around the grid without favouring big or small. It is why two clients of the same size can pay noticeably different prices, and why the within-segment relationship between volume and markup is clearly negative but far from perfect.
+
+Put together, the shares of the book look like this:
+
+| Segment | Share of trades | Share of EUR volume | Volume-weighted markup (bps) | Mean slippage (bps) | Gross margin (bps of volume) | Gross P&L (EUR m, 24 months) |
+|---|---|---|---|---|---|---|
+| Hedge fund | 25.2% | 58.4% | 0.61 | 0.30 | 0.31 | 3.7 |
+| Asset manager | 4.7% | 24.6% | 1.30 | 0.20 | 1.10 | 5.5 |
+| Payment institution | 54.7% | 8.6% | 4.38 | 0.05 | 4.34 | 7.6 |
+| Large corporate | 3.2% | 5.8% | 2.68 | 0.10 | 2.60 | 3.1 |
+| Mid-market | 8.5% | 2.4% | 9.59 | 0.05 | 9.54 | 4.8 |
+| SME | 3.7% | 0.1% | 24.25 | 0.02 | 24.22 | 0.7 |
+| **Book** | | | | | **1.24** | **25.3** |
+
+Hedge funds bring 58% of the volume and 15% of the gross P&L; mid-market corporates bring 2% of the volume and 19% of the P&L. That is the volume-versus-margin tension the analysis investigates, and it arrives with no client named in advance. These are gross figures: the cost to serve (spec section 5.5), which weighs heavily on small tickets, comes later in the dbt models.
+
+### 3.5 Rounding, the benchmark and the audit column
+
+- **Rounding.** `client_rate`, `cover_rate` and `mid_rate` are rounded to the pair's `price_decimals`, the precision a client price is quoted in (five decimals for EURUSD, a tenth of a pip, about 0.09 bps; two for EURHUF, about 0.25 bps; three for EURCZK, about 0.4 bps). The client and cover rates are computed from the unrounded mid and then rounded, so a client rate is on the correct side of `mid_rate` to within one price increment, not always strictly. P&L computed from the rounded columns carries up to a tick of rounding noise per trade. The noise averages out, but on a single hedge fund trade it can be as large as the markup.
+- **Benchmark.** `benchmark_rate` is the ECB reference rate for the trade's date and pair, exactly as published, not rounded to the quoting precision. Every trade has one; the generator fails, naming the pair and date, if a trading day lacks a fix. Section 2.7 explains why the mid sits close to the benchmark around 13:10 UTC by construction.
+- **`markup_bps_applied`.** The markup the formula produced, before rounding, in bps of the unrounded mid. It is an audit column, kept so a reader can check the pricing rule trade by trade. The realised spread recomputed from the rounded rates agrees with it to within rounding.
+
+### 3.6 What pricing and execution simplify
+
+- **Arrival is uniform through the day.** Real flow bunches at the London open, the New York overlap and the 4 pm London (WM/Reuters) fix, and around month-end. Here every second of the trading day is equally likely.
+- **Trades are independent.** No order is split, no client trades in bursts, and no two clients react to the same news.
+- **Cover is immediate and complete.** Each trade is hedged at its own minute's mid plus slippage. There is no internalisation (netting a client BUY against another client's SELL), no warehousing and no market risk carried overnight. A real desk nets a large part of its flow, which would make covering cheaper than this.
+- **Slippage does not depend on size or pair.** A EUR 10m hedge fund clip costs the same in bps to cover as a EUR 100k one, and EURTRY covers as cleanly as EURUSD. Adverse selection lives only in the slippage; clients do not trade ahead of the mid's direction.
+- **Prices do not react to the market.** The markup does not widen in volatile hours or for illiquid times of day.
+- **Compression is smooth.** Real repricing comes in steps (an annual review, a lost tender, a new platform). Here it is a steady exponential from the start of the window.
+
+### 3.7 Reproducibility and performance
+
+`generate_trades` uses only the `numpy.random.Generator` it is given, after `generate_clients` has used it, and draws in a fixed order:
+
+1. One mid path per pair, in sorted pair-code order (EURAUD first, EURZAR last), over every ECB business day in the snapshot including the buffer days, trimmed to the span from the first fix to the last.
+2. The daily trade counts: one Poisson draw per client per business day in the window, clients in book order.
+3. Per trade, one vectorised call each, in this order: second of the trading day, pair, side, ticket, markup noise, cover slippage.
+
+Trades are then sorted by timestamp, then `client_id`, then the order they were drawn in, and numbered `T0000001` onwards in that order, so the same configuration, snapshot and seed give a byte-identical table. A test checks this by hashing two generated frames.
+
+There is no Python loop over trades: every draw and every pricing step is a numpy operation over the whole book (the only loops are over the 15 pairs and the few distinct price precisions). The full 298,178-trade book takes about 0.3 seconds to generate in the pipeline container, mid paths included.

@@ -11,7 +11,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from fxengine.config import DEFAULT_CONFIG_PATH, GeneratorConfig, load_config
+from fxengine.config import DEFAULT_CONFIG_PATH, ClientBookConfig, GeneratorConfig, load_config
 from fxengine.ecb import CURRENCIES
 
 TIERS = ("g10_major", "g10_minor", "cee", "em")
@@ -253,3 +253,38 @@ def test_fix_time_must_fall_inside_trading_hours(variant):
 
     with pytest.raises(ValidationError, match="fix_time_utc"):
         load_config(variant(late))
+
+
+def test_fix_time_must_fall_before_the_close(variant):
+    # The trading day is half-open [open, close), so a fix exactly at the close is outside it.
+    def at_close(raw):
+        raw["fix_time_utc"] = raw["trading_hours_utc"][1]
+
+    with pytest.raises(ValidationError, match="fix_time_utc"):
+        load_config(variant(at_close))
+
+
+def test_fix_time_may_sit_at_the_open(variant):
+    def at_open(raw):
+        raw["fix_time_utc"] = raw["trading_hours_utc"][0]
+
+    assert load_config(variant(at_open)).fix_time_utc == time(7, 0)
+
+
+def test_client_book_code_defaults_match_the_yaml(cfg: GeneratorConfig):
+    assert ClientBookConfig() == cfg.client_book
+    assert ClientBookConfig().ticket_mu_sd == 0.7
+
+
+def test_client_markup_sigma(cfg: GeneratorConfig, variant):
+    sigmas = {name: seg.client_markup_sigma for name, seg in cfg.segments.items()}
+    assert all(0 < s <= 0.5 for s in sigmas.values())
+    # Bilateral corporate deals scatter most; rate-card SME pricing no more than anyone else.
+    assert sigmas["large_corporate"] == max(sigmas.values())
+    assert sigmas["sme"] == min(sigmas.values())
+
+    def negative(raw):
+        raw["segments"]["sme"]["client_markup_sigma"] = -0.1
+
+    with pytest.raises(ValidationError, match="greater than or equal to 0"):
+        load_config(variant(negative))
