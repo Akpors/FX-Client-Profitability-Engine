@@ -15,7 +15,7 @@ Every trade in the synthetic book is measured against an independent benchmark: 
 | Calendar | One fix per TARGET working day. **No fix on weekends or TARGET holidays** (1 January, Good Friday, Easter Monday, 1 May, 25 and 26 December). The ECB does still fix on days when other centres are shut (for example 4 July and US Thanksgiving, and the UK summer bank holiday), when USD or GBP liquidity may be thin. |
 | Precision | As published, not re-rounded by this repo. It varies by currency: 2 decimals for JPY and HUF, 3 for CZK, 4 for most others, 5 for GBP. |
 
-For contrast, the WM/Refinitiv 4pm London fix is a calculated window benchmark that clients can reference in fixing orders. The ECB rate is a different kind of object: a published indicative level, not an executable fix.
+For contrast, the WM/Reuters 4pm fix in London is a calculated window benchmark that clients can reference in fixing orders. The ECB rate is a different kind of object: a published indicative level, not an executable fix.
 
 ## 2. Why it is still a fair, independent benchmark for spot
 
@@ -45,7 +45,7 @@ What follows from that:
 
 ## 4. How the snapshot works
 
-The pipeline never calls the ECB at build time. It reads a CSV committed to the repo, so `make pipeline` runs offline and the same config plus the same snapshot gives byte-identical output.
+The pipeline never calls the ECB at build time. It reads a CSV committed to the repo, so `make pipeline` runs offline and the same config plus the same snapshot gives byte-identical output on the same Docker image and CPU architecture.
 
 **Window.** The most recent 24 complete calendar months before the build date. For a build on 2026-11-12 that is 2024-11-01 to 2026-10-31.
 

@@ -27,7 +27,7 @@ Segment sizes use the largest-remainder method, so the mix is exact (20, 50, 64,
 
 "Net direction" is the probability that the client buys EUR on a trade. All pairs are EUR-based, so a client buying EUR is selling the quote currency.
 
-- **Large corporates** run treasury conversions for payables, receivables and repatriation. A few trades a day in large tickets, with pricing negotiated by a dedicated coverage banker. European exporters turn foreign receivables into euros, hence the slight lean to buying EUR.
+- **Large corporates** run treasury conversions for payables, receivables and repatriation. About 25 trades a month in large tickets (one or two a business day), with pricing negotiated by a dedicated coverage banker. European exporters turn foreign receivables into euros, hence the slight lean to buying EUR.
 - **Mid-market corporates** are the middle of a dealer's franchise: tickets in the low hundreds of thousands and sales-negotiated spreads. They trade the major pairs plus CEE currencies (PLN, CZK, HUF).
 - **SMEs** are the long tail. Small tickets, a handful of trades a month, rate-card pricing that is rarely renegotiated, and the highest cost to serve per euro traded. They are net importers paying foreign suppliers, so they lean to selling EUR.
 - **Asset managers** (real money) trade rebalancing and benchmark-driven flow in large tickets, with more weight on JPY and AUD than corporates. Volume is high but ticket count is modest.
@@ -102,19 +102,21 @@ A sigma of 0.30 means about two clients in three sit within a factor of 1.35 of 
 
 **What the generated book shows.** For each client, take its realised annual EUR volume (traded notional over the window divided by the years it was active) and its median markup on the G10 majors (EURUSD, EURGBP, EURJPY, EURCHF). Over the 298,178 trades generated at seed 42:
 
-| Spearman, volume against G10-major markup | All 200 clients | Large corp. | Mid-market | SME | Asset mgr | Hedge fund | Payment inst. |
-|---|---|---|---|---|---|---|---|
-| Shipped defaults | -0.91 | -0.20 | -0.20 | -0.10 | -0.73 | -0.44 | -0.49 |
-| Negotiation factor off (sigma 0) | -0.93 | -0.55 | -0.48 | -0.22 | -0.83 | -0.75 | -0.59 |
-| Volume tiers and ticket bands off | -0.87 | +0.06 | +0.12 | -0.01 | -0.34 | +0.16 | -0.24 |
+| Spearman, volume against G10-major markup | All 200 clients | Pooled within segment | Large corp. | Mid-market | SME | Asset mgr | Hedge fund | Payment inst. |
+|---|---|---|---|---|---|---|---|---|
+| Shipped defaults | -0.91 | -0.29 | -0.20 | -0.20 | -0.10 | -0.73 | -0.44 | -0.49 |
+| Negotiation factor off (sigma 0) | -0.93 | | -0.55 | -0.48 | -0.22 | -0.83 | -0.75 | -0.59 |
+| Volume tiers and ticket bands off | -0.87 | -0.03 | +0.06 | +0.12 | -0.01 | -0.34 | +0.16 | -0.24 |
+
+"Pooled within segment" takes the segment ladder out: each client's volume and markup are ranked as percentiles within its own segment, each segment's ranks are centred on zero, and the pooled ranks are correlated. It is in effect a weighted average of the six within-segment correlations, so it reads the grid's effect in one number.
 
 Three things follow.
 
 - **Across the whole book the correlation is about -0.9, and the segment ladder supplies most of it.** A hedge fund is priced tighter than an SME on any desk, whatever the tiers do: with tiers and bands switched off the book-wide figure is still -0.87. That part is market structure, not a finding, and the analysis should not present it as one.
-- **Within a segment, the grid is what makes bigger clients cheaper.** With the tiers and ticket bands off, the within-segment correlations scatter around zero (from -0.34 to +0.16, the noise of 16 to 64 clients). With them on, every segment is negative. So a segment's bigger clients pay less because the grid gives volume a discount, not because anyone labelled them.
+- **Within a segment, the grid is what makes bigger clients cheaper.** With the tiers and ticket bands off, the within-segment correlations scatter around zero (from -0.34 to +0.16, the noise of 16 to 64 clients) and the pooled figure is -0.03. With them on, the pooled figure is -0.29, and at seed 42 every segment is negative. That last part is a property of this seed, not a rule: across seeds 42 to 61, six seeds have one segment at or slightly above zero (at most +0.18), while the pooled figure is negative at every seed (-0.26 to -0.47). So a segment's bigger clients pay less because the grid gives volume a discount, not because anyone labelled them.
 - **The negotiation factor makes the within-segment pattern look like real data.** Without it, the within-segment correlations run to -0.83, too tidy for a book where every price was negotiated. With it they run from -0.10 to -0.73 at seed 42. Across 20 seeds (42 to 61) the averages are -0.28 for large corporates, -0.35 for mid-market, -0.23 for SMEs, -0.42 for asset managers, -0.55 for hedge funds and -0.42 for payment institutions. Seed 42 is on the weak side for the two corporate segments. SMEs show the least because they all sit in the bottom volume tier and only the ticket bands separate them.
 
-The client-level test in the repo checks a proxy before any trade exists (expected volume against base x band at the median ticket x tier x legacy x negotiation factor) and requires a correlation below -0.5. The trade-level test requires below -0.3 on the generated book.
+The client-level test in the repo checks a proxy before any trade exists (expected volume against base x band at the median ticket x tier x legacy x negotiation factor) and requires a correlation below -0.5. On the generated book, one trade-level test requires the all-client correlation to be below -0.3. That one would pass on the segment ladder alone, so a second requires the pooled within-segment figure to be below -0.15, and a third checks that the same figure with the tiers and bands off stays above -0.15. Together they fail if the grid stops doing its job.
 
 ### 1.5 Onboarding and legacy deals
 
@@ -150,7 +152,7 @@ The expected total, with the means from 1.1:
 
 Not every client is active for all 24 months. Of each segment, 80% are active for 24 months and 20% for 12 months on average, so a client is active for 0.8 x 24 + 0.2 x 12 = 21.6 months on average. Expected trades are therefore 13,910 x 21.6, about 300,000, which is 69.6 trades per active client-month, or 62.6 per client-month across all 24 months. At seed 42 the drawn clients give an expected 298,900 trades (99.6% of target) on the 509 business days in the window. The Poisson noise on top is a few hundred trades: the generated book (section 3) has 298,178.
 
-That total is sensitive to the draw of a few busy clients. Across 200 different client-book seeds the expected total averages about 302,000 with a spread of about 11%, and 97% of the seeds land within 20% of the target. Seed 42 lands very close. Changing any frequency in the config moves the total in proportion; the parameter sheet shows both the inputs and the resulting expected count.
+That total is sensitive to the draw of a few busy clients. Across 200 different client-book seeds the expected total averages about 302,000 with a spread of about 11%, and 97% of the seeds land within 20% of the target. Seed 42 lands very close. Changing any frequency in the config moves the total in proportion. Trade frequencies are not on the parameter sheet; they are set in `generator.yaml`, and the client-level test `test_expected_trade_count_is_close_to_target` checks the expected count against `target_trades`.
 
 ### 1.8 What the client book simplifies
 
@@ -276,7 +278,7 @@ None of this says the ECB fix is a bad benchmark. It is a published reference, a
 - **Variance is concentrated in the trading day.** All of a day's variance is spread across the 540 trading minutes and none is placed overnight, so the per-minute volatility is about 1.6 times what it would be if the same daily variance were spread over 24 hours. Intraday noise is a little rougher than a 24-hour spread would imply.
 - **Currencies are independent.** Each pair's path is drawn without reference to the others, so EURUSD and EURGBP can move in opposite directions on a day when, in reality, both would follow the dollar.
 - **One fixed fix time all year**, as covered in 2.5.
-- **The mid is a single price.** There is no bid and no ask here, so the spread a client pays is the markup applied to the mid in the pricing stage (section 3), with nothing in the market price standing for the touch.
+- **The mid is a single price.** There is no bid and no ask in the simulated market, so the spread a client pays is the markup applied to the mid in the pricing stage (section 3). The interbank bid/offer enters only where the dealer covers: it pays a fixed half-spread per liquidity tier on every hedge (section 3.3), the same at every minute of the day.
 
 ### 2.9 Reproducibility
 
@@ -284,7 +286,7 @@ None of this says the ECB fix is a bad benchmark. It is a published reference, a
 
 ## 3. Pricing and execution
 
-Code: `fxengine.trades.generate_trades`. Configuration: each segment's `base_markup_bps`, `markup_noise_sigma`, `compression_per_year`, `adverse_selection_bps` and `buy_probability`, plus `ticket_bands`, `volume_tiers` and `legacy_deal` in `generator.yaml`; the client attributes come from section 1.
+Code: `fxengine.trades.generate_trades`. Configuration: each segment's `base_markup_bps`, `markup_noise_sigma`, `compression_per_year`, `adverse_selection_bps` and `buy_probability`, plus `cover_half_spread_bps`, `ticket_bands`, `volume_tiers` and `legacy_deal` in `generator.yaml`; the client attributes come from section 1.
 
 This stage turns the client book into trades. For each trade it decides when it happens, in which pair, in which direction and for how much, then prices it the way a dealer's pricing grid would and covers it in the market. The output is the `raw.trades` table. At seed 42 on the committed snapshot it holds 298,178 trades over the 509 ECB business days from 1 November 2024 to 30 October 2026.
 
@@ -323,9 +325,9 @@ Median `markup_bps_applied` in the generated book, by segment and liquidity tier
 
 | Segment | G10 major | G10 minor | CEE | EM |
 |---|---|---|---|---|
-| SME | 17.7 | 27.7 | 47.5 | 73.5 |
+| SME | 17.7 | 27.7 | 47.4 | 73.5 |
 | Mid-market | 6.0 | 10.4 | 17.7 | 30.0 |
-| Payment institution | 3.0 | 5.3 | 10.1 | 17.7 |
+| Payment institution | 3.0 | 5.2 | 10.1 | 17.7 |
 | Large corporate | 2.3 | 4.0 | 7.0 | 11.3 |
 | Asset manager | 1.0 | 1.6 | 3.1 | 6.3 |
 | Hedge fund | 0.4 | 0.7 | 1.5 | 2.4 |
@@ -337,26 +339,41 @@ On EURUSD alone the medians are SME 18.0, mid-market 6.0, payment institution 3.
 With `side_sign = +1` when the client BUYs EUR and `-1` when it SELLs EUR:
 
 ```
-client_rate = mid x (1 + side_sign x markup_bps   / 10,000)
-cover_rate  = mid x (1 + side_sign x slippage_bps / 10,000)      slippage_bps ~ Normal(mean, sd) by segment
+client_rate = mid x (1 + side_sign x markup_bps / 10,000)
+cover_rate  = mid x (1 + side_sign x (slippage_bps + half_spread_bps) / 10,000)
+              slippage_bps    ~ Normal(mean, sd) by segment              (adverse selection)
+              half_spread_bps = cover_half_spread_bps[liquidity_tier(pair)]   (fixed, no random draw)
 ```
 
 All rates are quote currency per EUR, like the ECB fix.
 
-- **Client BUY.** The dealer sells EUR to the client above the mid (`client_rate > mid`) and buys the EUR back in the market at `cover_rate`.
-- **Client SELL.** The dealer buys EUR from the client below the mid (`client_rate < mid`) and sells it in the market at `cover_rate`.
+- **Client BUY.** The dealer sells EUR to the client above the mid (`client_rate > mid`) and buys the EUR back in the market at `cover_rate`, at the interbank offer.
+- **Client SELL.** The dealer buys EUR from the client below the mid (`client_rate < mid`) and sells it in the market at `cover_rate`, at the interbank bid.
 
-**Slippage is signed so that positive is worse for the dealer**, on either side. On a client BUY a positive slippage puts the cover above the mid, so the dealer pays more for the EUR it has just sold; on a client SELL it puts the cover below the mid, so the dealer receives less for the EUR it has just bought. Dealer gross P&L is then
+**The cover pays the interbank half-spread.** A dealer that hedges in the market does not trade at mid: it lifts the offer to buy and hits the bid to sell, so every cover costs half the interbank bid/offer, by the pair's liquidity tier:
+
+| Liquidity tier | Pairs | `cover_half_spread_bps` |
+|---|---|---|
+| g10_major | USD, GBP, JPY, CHF | 0.1 |
+| g10_minor | SEK, NOK, DKK, AUD, CAD | 0.4 |
+| cee | PLN, CZK, HUF | 1.0 |
+| em | ZAR, TRY, MXN | 2.5 |
+
+These are illustrative values for a European dealer's cover in normal market hours, not measured spreads, and the owner calibrates them at the gate. The configuration requires all four tiers, no negative value, and an order that does not narrow as liquidity thins (major, minor, CEE, EM). The half-spread is a lookup, not a random draw, so adding it leaves every other column of the book, and the random stream, unchanged.
+
+**Slippage is signed so that positive is worse for the dealer**, on either side. On a client BUY a positive slippage puts the cover above the mid, so the dealer pays more for the EUR it has just sold; on a client SELL it puts the cover below the mid, so the dealer receives less for the EUR it has just bought. The half-spread is signed the same way. Dealer gross P&L is then
 
 ```
 gross_pnl_quote = side_sign x (client_rate - cover_rate) x notional_base
-                = mid x (markup_bps - slippage_bps) / 10,000 x notional_base       (before rounding)
+                = mid x (markup_bps - slippage_bps - half_spread_bps) / 10,000 x notional_base   (before rounding)
 gross_pnl_eur   = gross_pnl_quote / benchmark_rate
 ```
 
-so the dealer keeps the markup minus the slippage. The slippage mean is the segment's adverse selection: how far the market has moved against the dealer by the time it hedges a client's trade. It is largest for hedge funds (mean 0.30 bps, sd 0.80), whose flow is informed and fast, then asset managers (0.20, sd 0.50) whose large rebalancing tickets move the market a little, and close to zero for corporates and SMEs (0.02 to 0.10). The mean may be negative in the configuration (a client whose flow the dealer can cover better than mid); the defaults do not use that.
+so the dealer keeps the markup minus the slippage and the half-spread. The slippage mean is the segment's adverse selection: how far the market has moved against the dealer by the time it hedges a client's trade. It is largest for hedge funds (mean 0.30 bps, sd 0.80), whose flow is informed and fast, then asset managers (0.20, sd 0.50) whose large rebalancing tickets move the market a little, and close to zero for corporates and SMEs (0.02 to 0.10). The mean may be negative in the configuration (a client whose flow the dealer can cover better than mid); the defaults do not use that.
 
-In the generated book the volume-weighted hedge fund markup is 0.61 bps and the mean slippage 0.30 bps, so the dealer keeps 0.31 bps: adverse selection takes half of what the hedge funds pay. One hedge fund trade in three (35%) loses money before costs, against 6% for asset managers and none to speak of elsewhere. This is the reason a tight markup is not the same thing as a profitable client, and why the analysis measures realised margin against the cover rather than the quoted markup.
+In the generated book the volume-weighted hedge fund markup is 0.61 bps. Adverse selection takes 0.30 bps of it and the cover half-spread another 0.37 bps (72% of hedge fund volume is in the majors at 0.1 bps, but its minor, CEE and EM flow pays 0.4 to 2.5), which leaves the dealer **-0.07 bps**: at the shipped defaults, hedge fund flow loses money before any cost to serve. Nearly half of hedge fund trades (47%) lose money before costs, against 9% for asset managers and almost none elsewhere. By tier the hedge fund gross margin is -0.02 bps on the majors, -0.06 on the minors, +0.04 on CEE and -0.56 on EM, where 61% of trades lose. The segments that pay wider markups absorb the half-spread comfortably: on EM pairs, asset managers keep 2.68 bps, large corporates 6.65, payment institutions 9.28, mid-market corporates 25.3 and SMEs 66.5.
+
+This is the reason a tight markup is not the same thing as a profitable client, and why the analysis measures realised margin against the cover rather than the quoted markup. It is also the result for a desk that covers every trade on its own. A desk that internalises would pay the half-spread on less of the hedge fund flow (section 3.6), so read the hedge fund figure as the cost of covering this flow trade by trade, not as a verdict on hedge fund business in general.
 
 ### 3.4 Why the high-volume, low-margin pattern emerges
 
@@ -367,25 +384,27 @@ No step in the generator looks at a client's volume and assigns it a margin. The
 | Segment price ladder | Fast, electronic and institutional flow is quoted tighter than corporate and SME flow. | EURUSD median from 18.0 bps (SME) to 0.4 bps (hedge funds). |
 | Volume tiers | A client's expected annual volume earns 0% to 40% off its markup (1.3). | Median client G10-major markup falls tier by tier: 16.4, 5.0, 2.6, 0.93, 0.57 and 0.36 bps. |
 | Ticket bands | Bigger tickets are priced tighter, from x1.80 under EUR 25k to x0.55 at EUR 10m and above. | Mid-market EURUSD median 8.6 bps under 25k, 6.8 at 25k-100k, 5.3 at 100k-500k, 4.5 at 500k-2m. |
-| Legacy deals | 39 existing clients keep an old 25% discount whatever their size today. | Within every segment, legacy clients' median G10-major markup is 71% to 80% of their peers'. |
-| Compression | Markups drift down through the window, fastest for electronic flow. | Hedge fund EURUSD median 0.46 bps in the first quarter, 0.34 in the last (x0.74); SMEs x0.99. |
-| Adverse selection | The busiest, tightest-priced flow is also the hardest to cover. | Hedge funds keep 0.31 of their 0.61 bps markup. |
+| Legacy deals | 39 existing clients keep an old 25% discount whatever their size today. | Within every segment, the median legacy client's G10-major markup is 72% to 82% of the median non-legacy client's (each client's own median markup, then the ratio of the two group medians; legacy groups are 3 to 17 clients). |
+| Compression | Markups drift down through the window, fastest for electronic flow. | Hedge fund EURUSD median 0.46 bps in the first three months (November 2024 to January 2025), 0.35 in the last three (August to October 2026), x0.77 against exp(-0.18 x 1.75) = 0.73 configured; SMEs, with no compression, x1.04 (noise and mix). |
+| Adverse selection and cover cost | The busiest, tightest-priced flow is also the hardest to cover, and every cover pays the interbank half-spread. | Hedge funds' 0.61 bps markup loses 0.30 bps to adverse selection and 0.37 bps to the half-spread, leaving -0.07 bps. |
 
 Under all six sits the negotiation factor (1.4), which scatters clients around the grid without favouring big or small. It is why two clients of the same size can pay noticeably different prices, and why the within-segment relationship between volume and markup is clearly negative but far from perfect.
 
 Put together, the shares of the book look like this:
 
-| Segment | Share of trades | Share of EUR volume | Volume-weighted markup (bps) | Mean slippage (bps) | Gross margin (bps of volume) | Gross P&L (EUR m, 24 months) |
-|---|---|---|---|---|---|---|
-| Hedge fund | 25.2% | 58.4% | 0.61 | 0.30 | 0.31 | 3.7 |
-| Asset manager | 4.7% | 24.6% | 1.30 | 0.20 | 1.10 | 5.5 |
-| Payment institution | 54.7% | 8.6% | 4.38 | 0.05 | 4.34 | 7.6 |
-| Large corporate | 3.2% | 5.8% | 2.68 | 0.10 | 2.60 | 3.1 |
-| Mid-market | 8.5% | 2.4% | 9.59 | 0.05 | 9.54 | 4.8 |
-| SME | 3.7% | 0.1% | 24.25 | 0.02 | 24.22 | 0.7 |
-| **Book** | | | | | **1.24** | **25.3** |
+| Segment | Share of trades | Share of EUR volume | Markup (bps) | Slippage (bps) | Cover half-spread (bps) | Gross margin (bps of volume) | Gross P&L (EUR m, 24 months) |
+|---|---|---|---|---|---|---|---|
+| Hedge fund | 25.2% | 58.4% | 0.61 | 0.30 | 0.37 | -0.07 | -0.78 |
+| Asset manager | 4.7% | 24.6% | 1.30 | 0.20 | 0.35 | 0.75 | 3.75 |
+| Payment institution | 54.7% | 8.6% | 4.38 | 0.05 | 0.59 | 3.75 | 6.60 |
+| Large corporate | 3.2% | 5.8% | 2.68 | 0.09 | 0.32 | 2.28 | 2.68 |
+| Mid-market | 8.5% | 2.4% | 9.59 | 0.05 | 0.46 | 9.08 | 4.53 |
+| SME | 3.7% | 0.1% | 24.25 | 0.02 | 0.40 | 23.83 | 0.66 |
+| **Book** | | | | | **0.39** | **0.85** | **17.43** |
 
-Hedge funds bring 58% of the volume and 15% of the gross P&L; mid-market corporates bring 2% of the volume and 19% of the P&L. That is the volume-versus-margin tension the analysis investigates, and it arrives with no client named in advance. These are gross figures: the cost to serve (spec section 5.5), which weighs heavily on small tickets, comes later in the dbt models.
+Markup, slippage and half-spread are volume-weighted, so markup minus slippage minus half-spread gives the gross margin to within rounding. Across the book the half-spread costs EUR 7.9m over the 24 months, and the gross margin falls from 1.24 bps without it to 0.85 bps.
+
+Hedge funds bring 58% of the volume and lose EUR 0.8m at gross (-4.5% of the book's gross P&L); mid-market corporates bring 2% of the volume and 26% of the P&L. That is the volume-versus-margin tension the analysis investigates, and it arrives with no client named in advance. These are gross figures: the cost to serve (spec section 5.5), which weighs heavily on small tickets, comes later in the dbt models.
 
 ### 3.5 Rounding, the benchmark and the audit column
 
@@ -395,10 +414,10 @@ Hedge funds bring 58% of the volume and 15% of the gross P&L; mid-market corpora
 
 ### 3.6 What pricing and execution simplify
 
-- **Arrival is uniform through the day.** Real flow bunches at the London open, the New York overlap and the 4 pm London (WM/Reuters) fix, and around month-end. Here every second of the trading day is equally likely.
+- **Arrival is uniform through the day.** Real flow bunches at the London open, the New York overlap and the WM/Reuters 4pm fix, and around month-end. Here every second of the trading day is equally likely.
 - **Trades are independent.** No order is split, no client trades in bursts, and no two clients react to the same news.
-- **Cover is immediate and complete.** Each trade is hedged at its own minute's mid plus slippage. There is no internalisation (netting a client BUY against another client's SELL), no warehousing and no market risk carried overnight. A real desk nets a large part of its flow, which would make covering cheaper than this.
-- **Slippage does not depend on size or pair.** A EUR 10m hedge fund clip costs the same in bps to cover as a EUR 100k one, and EURTRY covers as cleanly as EURUSD. Adverse selection lives only in the slippage; clients do not trade ahead of the mid's direction.
+- **Cover is immediate and complete.** Each trade is hedged on its own, at its own minute's mid plus slippage plus the tier half-spread. There is no internalisation (netting a client BUY against another client's SELL), no warehousing and no market risk carried overnight. A real desk nets a large part of its flow, so a smaller share of it ever goes to the market and pays the interbank half-spread. Netting does not make any one cover cheaper; it means fewer trades need one. Here every trade pays it, which overstates the cover cost of a desk that internalises, most of all for the high-turnover, two-way flow of hedge funds and payment institutions.
+- **Cover cost does not depend on size or time of day.** A EUR 10m hedge fund clip costs the same in bps to cover as a EUR 100k one, and the half-spread is the same at 07:00 as at the London close and on a quiet day as in a sell-off. It varies only by the pair's liquidity tier (EURTRY pays more than EURUSD), and the slippage only by segment. Adverse selection lives only in the slippage; clients do not trade ahead of the mid's direction.
 - **Prices do not react to the market.** The markup does not widen in volatile hours or for illiquid times of day.
 - **Compression is smooth.** Real repricing comes in steps (an annual review, a lost tender, a new platform). Here it is a steady exponential from the start of the window.
 
@@ -407,9 +426,9 @@ Hedge funds bring 58% of the volume and 15% of the gross P&L; mid-market corpora
 `generate_trades` uses only the `numpy.random.Generator` it is given, after `generate_clients` has used it, and draws in a fixed order:
 
 1. One mid path per pair, in sorted pair-code order (EURAUD first, EURZAR last), over every ECB business day in the snapshot including the buffer days, trimmed to the span from the first fix to the last.
-2. The daily trade counts: one Poisson draw per client per business day in the window, clients in book order.
+2. The daily trade counts: one Poisson draw per active client-day (a business day in the window on or after the client's onboarding date), clients in book order. The draws are made as one matrix over every client and day, but a day before onboarding has a mean of zero, and numpy's `rng.poisson(0)` consumes nothing from the stream.
 3. Per trade, one vectorised call each, in this order: second of the trading day, pair, side, ticket, markup noise, cover slippage.
 
-Trades are then sorted by timestamp, then `client_id`, then the order they were drawn in, and numbered `T0000001` onwards in that order, so the same configuration, snapshot and seed give a byte-identical table. A test checks this by hashing two generated frames.
+Trades are then sorted by timestamp, then `client_id`, then the order they were drawn in, and numbered `T0000001` onwards in that order, so the same configuration, snapshot and seed give a byte-identical table on the same Docker image and CPU architecture (floating-point results can differ in the last bit across architectures or library builds). A test checks this by hashing two generated frames. The cover half-spread is a lookup, not a draw, so it is outside this list.
 
 There is no Python loop over trades: every draw and every pricing step is a numpy operation over the whole book (the only loops are over the 15 pairs and the few distinct price precisions). The full 298,178-trade book takes about 0.3 seconds to generate in the pipeline container, mid paths included.

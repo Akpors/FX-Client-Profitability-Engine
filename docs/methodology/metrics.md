@@ -2,7 +2,7 @@
 
 This page defines every number the engine reports: the exact formula, the grain it is calculated at, the dbt model that produces it and why a dealer cares about it. The definitions are the contract. The models implement them and the tests pin them, so if a figure in the dashboard disagrees with this page, the dashboard is wrong.
 
-The page is organised by grain. It starts at the single trade, because every client, currency and portfolio figure is an aggregation of trade-level numbers, and adds sections as the models for each grain arrive. The numbers it quotes in worked examples are hand-checkable on purpose. The shipped parameters and the generated book are described in [the data-generation note](data-generation.md).
+The page is organised by grain. It starts at the single trade, because every client, currency and portfolio figure is an aggregation of trade-level numbers, and works up to the client, the currency pair, the month and the whole book. The numbers it quotes in worked examples are hand-checkable on purpose. The shipped parameters and the generated book are described in [the data-generation note](data-generation.md).
 
 ## Conventions
 
@@ -24,7 +24,7 @@ These hold throughout the engine and are not repeated in each definition.
 | --- | --- | --- |
 | Gross spread (2) | `gross_pnl_quote`, `gross_pnl_eur`, `gross_margin_bps` | What the dealer earned on the trade, in quote currency and EUR, and as bps of notional |
 | Benchmark spread (3) | `benchmark_spread_bps` | How far the client's rate was from the ECB fix, in bps, positive when the client paid away from it |
-| Execution quality (10) | `cover_slippage_bps` | How far the dealer's hedge was from the market mid, in bps, positive when the hedge was worse for the dealer |
+| Execution quality (10) | `cover_slippage_bps` | How far the dealer's hedge was from the market mid, in bps, positive when the hedge was worse for the dealer. It includes the interbank half-spread the hedge pays |
 | Cost to serve | `ops_cost_eur`, `capital_charge_eur` | Per-ticket operations cost and settlement-risk capital charge, inputs to economic contribution |
 
 Attributes joined on the way: `side_sign`, `notional_eur`, `trade_month` (first day of the month of `trade_date`), `segment` (from the client), `liquidity_tier` (from the pair) and `ticket_band`.
@@ -67,7 +67,7 @@ How far the dealer's hedge landed from the market mid at the time of the trade. 
 - on a client BUY the dealer has to buy EUR back in the market, so a `cover_rate` above `mid_rate` means it paid more than mid;
 - on a client SELL the dealer has to sell EUR in the market, so a `cover_rate` below `mid_rate` means it received less than mid. The `side_sign` makes this positive too.
 
-Zero is covering at mid. Negative means the dealer covered better than mid. Sustained positive slippage on a client's flow is the signature of adverse selection: the market moves against the dealer between the client's trade and the hedge. It is the cost that a tight quoted markup hides, and the reason a client can be tightly priced and still unprofitable. The spec's execution-quality metric is this number aggregated by client and segment.
+Zero is covering at mid. Negative means the dealer covered better than mid. A dealer that hedges in the market cannot cover at mid: it buys at the offer and sells at the bid, so every cover carries half the interbank bid/offer, and that floor is part of this number. In the generated book it is a fixed half-spread per liquidity tier (0.1 bps on the majors up to 2.5 bps on EM at the shipped defaults; see [the data-generation note](data-generation.md), section 3.3). Slippage persistently **above the pair's half-spread** on a client's flow is the signature of adverse selection: the market moves against the dealer between the client's trade and the hedge. So compare a client's or a pair's slippage with its half-spread, not with zero: an EM pair shows more slippage than EURUSD simply because its market is wider. It is the cost that a tight quoted markup hides, and the reason a client can be tightly priced and still unprofitable. The spec's execution-quality metric is this number aggregated by client and segment.
 
 ### 1.5 Costs
 
@@ -77,7 +77,7 @@ capital_charge_eur = notional_eur × capital_charge_bps / 10,000 × credit_weigh
 ```
 
 - `ops_cost_eur` is a flat amount per ticket for confirmation, settlement and payments. It varies by segment (it is cheapest per ticket for the automated segments).
-- `capital_charge_eur` prices the settlement risk of a spot trade, which has no tenor, so the charge scales with notional. `capital_charge_bps` is the charge in bps at weights of 1.0, `credit_weight` is the client's segment credit weight, and `settlement_weight` is the pair's multiplier: 1.0 for pairs settled through CLS and higher for pairs settled bilaterally outside it (PLN, CZK and TRY). The settlement weight is read per pair from the pair reference, not from the parameter list.
+- `capital_charge_eur` is an internal charge for settlement risk and the use of the client's credit line, not regulatory capital. A spot trade has no tenor, so the charge scales with notional. `capital_charge_bps` is the charge in bps at weights of 1.0, `credit_weight` is the client's segment credit weight, and `settlement_weight` is the pair's multiplier: 1.0 for pairs settled through CLS and higher for pairs settled bilaterally outside it (PLN, CZK and TRY). The settlement weight is read per pair from the pair reference, not from the parameter list.
 - Coverage cost (sales time) is a per-client, per-month amount, not a per-trade one, and appears when trades are rolled up to client-months.
 
 All of these are illustrative assumptions and are labelled as such. Gross spread is not profit: these costs are what turn it into economic contribution.
@@ -197,7 +197,7 @@ gross_margin_bps = revenue_eur / volume_eur × 10,000
 avg_benchmark_spread_bps = Σ (benchmark_spread_bps × notional_eur) / Σ notional_eur
 ```
 
-**Grain:** client × window. **On the desk:** the client's all-in price against the ECB fix, the number a client's treasury or a TCA provider would compute. It is independent of the dealer's hedging, so it is what the client sees; if it is wide while the gross margin is thin, the dealer is losing the difference in its cover.
+**Grain:** client × window. **On the desk:** the client's all-in price against the ECB fix, the check a treasury without a market-data feed can run on its own statements. It is independent of the dealer's hedging, so it is what the client sees; if it is wide while the gross margin is thin, the dealer is losing the difference in its cover.
 
 ### 3.4 Client profitability (metric 4)
 
@@ -256,7 +256,7 @@ Each set of shares sums to 1 across the book (tested to 1e-9). Sorted by `contri
 avg_cover_slippage_bps = Σ (cover_slippage_bps × notional_eur) / Σ notional_eur
 ```
 
-Positive is a cost to the dealer (section 1.4). **Grain:** client × window (and pair, section 4). **On the desk:** persistent positive slippage on one client's flow means the market moves against the dealer straight after that client trades: informed or toxic flow. It is the cost a tight quoted markup hides, and the first number to check before agreeing to tighten a fast-money client further.
+Positive is a cost to the dealer (section 1.4). It includes the interbank half-spread of the pairs the client trades, so a client that trades EM pays more of it than one that trades EURUSD. **Grain:** client × window (and pair, section 4). **On the desk:** slippage persistently above the half-spread of the client's pairs means the market moves against the dealer straight after that client trades: informed or toxic flow. It is the cost a tight quoted markup hides, and the first number to check before agreeing to tighten a fast-money client further.
 
 ### 3.9 Peer benchmark
 
@@ -314,7 +314,7 @@ margin_ex_coverage_bps       = contribution_ex_coverage_eur / volume_eur × 10,0
 
 **Why coverage is excluded here.** Coverage pays for the client relationship, not for a currency. A treasurer who trades EURUSD and EURPLN costs the same sales time as one who trades only EURUSD, and the cost does not go away if one pair stops trading. Splitting it across pairs (by volume, by tickets) would be an allocation choice, and whichever key is used, the answer to "is EURPLN profitable?" would then move with that choice rather than with anything about EURPLN. Ops cost and capital charge are per trade, so they belong to the trade's pair. The client-level contribution in section 3 is the fully costed figure; this is the pair's contribution towards coverage and profit.
 
-**Grain:** currency pair × window. **On the desk:** it shows where the spread is earned. The majors carry the volume at fractions of a bp; the emerging and CEE pairs earn several bps on far less. It also shows where execution is hardest (cover slippage by pair) and where non-CLS settlement makes the capital charge bite.
+**Grain:** currency pair × window. **On the desk:** it shows where the spread is earned. The majors carry the volume at fractions of a bp; the emerging and CEE pairs earn several bps on far less. It also shows where execution is hardest (cover slippage by pair, which carries each pair's interbank half-spread) and where non-CLS settlement makes the capital charge bite.
 
 ## 5. Trade tables in the marts schema
 
@@ -361,7 +361,7 @@ Shares are computed **within the measure's own population**, so each measure's s
 
 ### 6.3 On the desk
 
-Compare the three measures with each other, because the gap is the story. Volume concentrated in a few names that hold a much smaller share of revenue, and a smaller share still of contribution, is the volume-trap picture at book level: the desk's biggest flows are not where it makes its money. Top-5 and top-20 are the dependency numbers a head of desk quotes ("five clients are X% of our contribution"), and the HHI is the single number that tracks the same thing without choosing a cut-off.
+Compare the three measures with each other, because the gap is the story. Volume concentrated in a few names that hold a much smaller share of revenue, and a smaller share still of contribution, is the volume-trap picture at book level: the desk's biggest flows are not where it makes its money. Top-5 and top-20 are the dependency numbers a head of desk quotes, and the HHI is the single number that tracks the same thing without choosing a cut-off. Quote the contribution figure for what it is: `contribution_positive` is a share of the contribution earned by the **profitable** clients only (section 6.1), so "five clients earn X% of the contribution our profitable clients earn". That total is larger than the book's net contribution whenever some clients lose money, so it understates how much the net result depends on those five; set it beside the client-level `contribution_share` (section 3.7), which is a share of the net total.
 
 ### 6.4 What is checked
 
@@ -395,9 +395,13 @@ Seven clients; these are the rows of the unit test.
 ```text
 gross_margin_bps               = Σ gross_pnl_eur / Σ notional_eur × 10,000        per month × segment × pair
 compression_slope_bps_per_year = regr_slope(gross_margin_bps, month_index) × 12    per segment × pair
+compression_pct_per_year       = compression_slope_bps_per_year
+                                 / |mean of the segment × pair's monthly gross_margin_bps| × 100
 ```
 
 `month_index` counts whole months since `window_start` (from `int_window`, section 2.1), 0 for the first month of the window. The slope is the ordinary least-squares slope of the monthly margin on the month index: bps per month, times 12 for bps per year. **Negative means the margin is compressing.** Each row carries its segment × pair's slope, repeated, and `n_months`, the number of months the regression used.
+
+`compression_pct_per_year` is the **relative rate of margin decline**: the bps slope as a percentage of the segment × pair's own average monthly margin (the plain mean of the monthly cells, matching the unweighted regression). A bps slope cannot be compared across segments whose margins differ about 80-fold: a hedge fund EURUSD margin falling 0.1 bps a year and an SME EURUSD margin falling 0.1 bps a year are very different stories. The percentage puts them on one scale. The divisor is the absolute mean, so the sign always follows the slope (negative = compressing), even for a cell whose average margin is negative. It is NULL when the mean margin is exactly zero and becomes unstable as the mean approaches zero, so where the margin is around zero (at the shipped defaults, most hedge fund pairs, after the cover half-spread) read the bps slope instead.
 
 ### 7.1 Why the monthly margin is a ratio of sums
 
@@ -405,7 +409,7 @@ Each monthly cell is the volume-weighted margin, `Σ P&L / Σ notional`, never t
 
 ### 7.2 Why the regression is not volume-weighted
 
-The slope is a plain (unweighted) least-squares fit across the monthly cells. Volume weighting is already done inside each cell, where it matters (the ratio of sums). Across months, each month is one observation of "what margin did this segment realise on this pair this month", and the question the slope answers is whether that margin is trending, not whether the euros are. A weighted fit would let the two or three biggest months decide the trend for a segment whose flow is lumpy, and the lumpiest flow (large tickets, few clients) is exactly where one trade swings a month. The price of the unweighted choice is that a thin month counts as much as a thick one. The slope of a pair with few trades a month is therefore noisy, and the average of slopes across the pairs of a segment is pulled around by its thinnest pairs. **Read a segment's compression from the median slope or from the volume-weighted average of its pair slopes, not from the plain mean of the pair slopes.**
+The slope is a plain (unweighted) least-squares fit across the monthly cells. Volume weighting is already done inside each cell, where it matters (the ratio of sums). Across months, each month is one observation of "what margin did this segment realise on this pair this month", and the question the slope answers is whether that margin is trending, not whether the euros are. A weighted fit would let the two or three biggest months decide the trend for a segment whose flow is lumpy, and the lumpiest flow (large tickets, few clients) is exactly where one trade swings a month. The price of the unweighted choice is that a thin month counts as much as a thick one. The slope of a pair with few trades a month is therefore noisy. **To compare segments, use `compression_pct_per_year`, not the bps slope,** and summarise a segment by the median of its pairs' percentages rather than the plain mean, which a thin pair or a near-zero margin can pull a long way. The mart has one row per month, so take each segment × pair's value once (it is repeated on every row) before summarising.
 
 The measure is also not like-for-like. It is the realised margin on whatever traded that month, so a change in the ticket-size or client mix inside a segment × pair moves it as well as a change in the price any client is given. It is the margin the desk actually earned, which is what a desk head asks about, and not an estimate of repricing.
 
@@ -417,15 +421,16 @@ At the shipped configuration (seed 42) the rule **drops 0 of the 90 combinations
 
 ### 7.4 On the desk
 
-A negative slope means the same flow is paying the desk less than it used to, which is competitive pressure in numbers. Compression is the early warning that sits ahead of a client-level loss: a segment can still be profitable at the book level while its margin on a pair has fallen every month for a year. Because the grain is segment × pair, it also says where: whether it is in the liquid majors, where it is expected, or in the pairs that carry the margin.
+A negative slope means the desk is earning less on that segment's flow in that pair than it used to. Usually that is competitive pressure, but it is a realised margin on a changing mix (section 7.2), so it can also mean the segment's flow has moved to bigger tickets or to clients on better terms. Before reading it as repricing, check whether the ticket mix or the client mix moved too. Compression is the early warning that sits ahead of a client-level loss: a segment can still be profitable at the book level while its margin on a pair has fallen every month for a year. Because the grain is segment × pair, it also says where: whether it is in the liquid majors, where it is expected, or in the pairs that carry the margin.
 
 ### 7.5 What is checked
 
 | Check | Where | What it pins |
 | --- | --- | --- |
 | `not_null` on `compression_slope_bps_per_year` | `_marts.yml` | The slope exists on every row, so the minimum-sample rule is working |
+| (no `not_null` on `compression_pct_per_year`) | | It is NULL by design when a cell's mean margin is exactly zero |
 | `unique` on month × segment × pair | `_marts.yml` | One row per cell |
-| Unit test `mart_spread_compression_slope_and_minimum_months` | `_marts.yml` | Section 7.6 |
+| Unit test `mart_spread_compression_slope_and_minimum_months` | `_marts.yml` | Section 7.6, including the percentage, a zero-margin cell (NULL) and a losing cell (sign) |
 
 ### 7.6 Worked example
 
@@ -440,7 +445,7 @@ Window starting 1 January 2025. Segment `sme`, pair EURUSD, trades in January, F
 | Jun | 5 | EUR 1m earning 500 | 5 |
 | Jul | 6 | EUR 1m earning 400 | 4 |
 
-The margin is 10 minus the month index every month, so the slope is exactly −1 bp a month, and `compression_slope_bps_per_year` is **−12**. Indexing the six rows 0 to 5 instead of by calendar month would give a different slope, which is why the index comes from the window. A `hedge_fund` EURUSD series at a flat 3 bps has slope 0 and is regressed separately from the `sme` one. An `sme` EURGBP series with trades in only five months has no rows at all.
+The margin is 10 minus the month index every month, so the slope is exactly −1 bp a month, and `compression_slope_bps_per_year` is **−12**. Indexing the six rows 0 to 5 instead of by calendar month would give a different slope, which is why the index comes from the window. The mean monthly margin is (10 + 9 + 7 + 6 + 5 + 4) / 6 = 6.8333, so `compression_pct_per_year` is −12 / 6.8333 × 100 = **−175.6098**, a deliberately steep toy decline. A `hedge_fund` EURUSD series at a flat 3 bps has slope 0 (and 0%) and is regressed separately from the `sme` one. An `sme` EURGBP series with trades in only five months has no rows at all. The unit test adds two edge cases: a `payment_institution` EURUSD series at exactly 0 bps (slope 0, mean 0, percentage NULL) and a `hedge_fund` EURGBP series losing 1 to 6 bps (slope −12, mean −3.5, percentage −342.8571: a widening loss reads as compression, not as its opposite).
 
 ## 8. Client profitability trends (metric 12)
 
@@ -519,5 +524,7 @@ Client A's margins are 1.0, 2.0 and 3.0 bps economic (`100 / 1,000,000 × 10,000
 | `hurdle_rate_bps` | The `hurdle_rate_bps` parameter, looked up by name: the minimum economic margin, in bps of volume, for a client to earn its place |
 
 The totals are sums of `mart_client_profitability`, so they reconcile with the client mart and, through the section 3.12 tests, with the trades. `total_contribution_eur` includes the coverage cost of clients that did not trade: the desk pays it whether or not they traded, so a book total that left it out would overstate what the desk kept. `client_count` is therefore the clients that traded, not every client on the book. Comparing `economic_margin_bps` with `hurdle_rate_bps` says whether the book as a whole earns its hurdle; the per-client version is the volume-margin map (spec section 6.1).
+
+**The hurdle is an input, not a finding.** The shipped 0.75 bps is an illustrative builder default. It was chosen before any trades were generated (it was set with the first version of the config, commit 90fef95, ahead of the trade generator), so it was not tuned to put any client or segment on either side of the line. The owner sets it independently at the calibration gate, and every client's position against it moves with that choice.
 
 **Worked example** (the unit test `mart_headline_kpis_totals`). Three clients: A with 10 trades, EUR 1m volume, revenue 200 and contribution 150; B with 5 trades, EUR 500k, revenue 100 and contribution −20; C with no trades and contribution −30 (coverage). Volume 1.5m, revenue 300, contribution 150 − 20 − 30 = 100. Gross margin `300 / 1,500,000 × 10,000 = 2` bps, economic margin `100 / 1,500,000 × 10,000 = 0.6667` bps, `client_count` 2 (C did not trade), `trade_count` 15. The hurdle rate is picked out of the parameter table by name, not by position.
