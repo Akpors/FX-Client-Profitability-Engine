@@ -1,0 +1,259 @@
+# Generator configuration: every assumption behind the synthetic client book and trade book.
+#
+# These are the builder's ILLUSTRATIVE defaults. They are plausible for a European spot-FX
+# dealer but they are not real prices, and no real client or employer data was used. The owner
+# calibrates them at the parameter-sheet gate (spec section 11.1); after the freeze they do not
+# change. docs/methodology/data-generation.md explains how each block is used.
+#
+# Conventions
+#   *_bps         basis points; markups are ONE-SIDED, measured from market mid to client rate
+#   discount_pct  a FRACTION in [0, 1), so 0.25 means 25% off (despite the name)
+#   *_lognorm     [mu, sigma] of the UNDERLYING NORMAL (ln of the quantity), not mean and sd of
+#                 the lognormal itself. The mean is exp(mu + sigma^2 / 2); the median is exp(mu).
+#   times         UTC, quoted so YAML does not read 13:10 as a number
+
+seed: 42
+n_clients: 200
+target_trades: 300000        # over the 24-month window; tests accept +/-20%
+
+trading_hours_utc: ["07:00", "16:00"]   # a London/Frankfurt-centred spot day
+fix_time_utc: "13:10"                   # ECB fix proxy (concertation ~14:10 CET = 13:10 UTC in winter)
+
+# How the client book is drawn (see ClientBookConfig in config.py).
+client_book:
+  pre_window_share: 0.8       # 80% of each segment is onboarded before the window starts...
+  max_tenure_years: 6.0       # ...between 1 day and 6 years earlier; the rest join inside it
+  pair_concentration: 30.0    # Dirichlet: alpha = 30 x normalised pair_popularity
+  ticket_mu_sd: 0.7           # between-client sd of ln(median ticket): a factor of about 1.65 up or down per sd
+
+# ----------------------------------------------------------------------------------------------
+# Pairs. liquidity_tier drives the base markup; annual_vol drives the intraday mid; price_decimals
+# is the market quoting precision of a client price; cls_settled drives the settlement weight.
+# annual_vol is a rough 1-2 year realised level for the EUR cross, as a fraction.
+# ----------------------------------------------------------------------------------------------
+pairs:
+  EURUSD: {liquidity_tier: g10_major, annual_vol: 0.070, price_decimals: 5, cls_settled: true}
+  EURGBP: {liquidity_tier: g10_major, annual_vol: 0.060, price_decimals: 5, cls_settled: true}
+  EURJPY: {liquidity_tier: g10_major, annual_vol: 0.090, price_decimals: 3, cls_settled: true}
+  EURCHF: {liquidity_tier: g10_major, annual_vol: 0.055, price_decimals: 5, cls_settled: true}
+  EURSEK: {liquidity_tier: g10_minor, annual_vol: 0.070, price_decimals: 4, cls_settled: true}
+  EURNOK: {liquidity_tier: g10_minor, annual_vol: 0.080, price_decimals: 4, cls_settled: true}
+  # DKK is pegged to EUR inside the ERM II band, so it barely moves.
+  EURDKK: {liquidity_tier: g10_minor, annual_vol: 0.003, price_decimals: 5, cls_settled: true}
+  EURAUD: {liquidity_tier: g10_minor, annual_vol: 0.085, price_decimals: 5, cls_settled: true}
+  EURCAD: {liquidity_tier: g10_minor, annual_vol: 0.070, price_decimals: 5, cls_settled: true}
+  # PLN, CZK and TRY do not settle through CLS: bilateral settlement leaves principal risk open.
+  EURPLN: {liquidity_tier: cee, annual_vol: 0.050, price_decimals: 4, cls_settled: false}
+  EURCZK: {liquidity_tier: cee, annual_vol: 0.045, price_decimals: 3, cls_settled: false}
+  EURHUF: {liquidity_tier: cee, annual_vol: 0.090, price_decimals: 2, cls_settled: true}
+  EURZAR: {liquidity_tier: em, annual_vol: 0.140, price_decimals: 4, cls_settled: true}
+  # TRY is a managed currency with a steady depreciation trend and episodic jumps; 0.16 is
+  # the diffusion level only. The drift itself comes from the ECB fixes the mid is anchored to.
+  EURTRY: {liquidity_tier: em, annual_vol: 0.160, price_decimals: 4, cls_settled: false}
+  EURMXN: {liquidity_tier: em, annual_vol: 0.120, price_decimals: 4, cls_settled: true}
+
+# ----------------------------------------------------------------------------------------------
+# Cover half-spread by liquidity tier, in one-sided bps of mid. The dealer covers each client
+# trade in the interbank market: it buys EUR back at the offer after a client BUY and sells at the
+# bid after a client SELL, so it pays half the interbank bid/offer on every cover, on top of the
+# segment's adverse-selection slippage. ILLUSTRATIVE builder defaults for a European dealer's
+# cover in normal hours, owner to calibrate. Must not narrow as liquidity thins
+# (g10_major <= g10_minor <= cee <= em). Deterministic: it adds no random draw.
+# ----------------------------------------------------------------------------------------------
+cover_half_spread_bps:
+  g10_major: 0.1    # EURUSD, EURGBP, EURJPY, EURCHF: a fraction of a pip on the primary venues
+  g10_minor: 0.4    # Scandies, AUD, CAD (and the pegged DKK): wider, thinner books
+  cee: 1.0          # PLN, CZK, HUF: regional banks make the market, spreads of a few bps
+  em: 2.5           # ZAR, TRY, MXN: wide and jumpy; TRY widens sharply in stress
+
+# ----------------------------------------------------------------------------------------------
+# Segments.
+#   client_share              share of the 200-client book (must sum to 1)
+#   trades_per_month_lognorm  clients' trade frequency, drawn once per client
+#   ticket_eur_lognorm        segment centre of ln(median EUR ticket) and within-client sigma
+#   pair_popularity           relative weight of each pair for the segment (need not sum to 1)
+#   buy_probability           P(client BUYS EUR) on a trade. Below 0.5 means net sellers of EUR
+#   base_markup_bps           one-sided markup by pair liquidity tier, for a 100k-500k EUR ticket
+#                             (the reference band, multiplier 1.0) before discounts and noise
+#   markup_noise_sigma        sigma of the lognormal noise on each trade's markup
+#   client_markup_sigma       sigma of each client's lognormal NEGOTIATION FACTOR, drawn once per
+#                             client (median 1.0): the price the relationship banker agreed, its
+#                             price sensitivity and history, beyond what tier and ticket explain.
+#                             Bilateral corporate deals scatter most; rate-card SME pricing and
+#                             competitive electronic or panel flow scatter least
+#   compression_per_year      markup x exp(-rate x years since window start); competitive pressure
+#   adverse_selection_bps     [mean, sd] of dealer cover slippage vs mid. POSITIVE = WORSE FOR THE
+#                             DEALER. The mean can be any sign; the sd cannot be negative
+#   ops_cost_per_ticket_eur   confirmation, settlement, payments and reconciliation per trade
+#   coverage_cost_eur_per_month  sales and relationship time allocated to each client
+#   credit_weight             relative settlement-credit risk of the counterparty (1.0 = average)
+# ----------------------------------------------------------------------------------------------
+segments:
+  # Treasury spot conversions for payables, receivables and repatriation. Big tickets, about 25
+  # a month (one or two a business day), negotiated tight pricing, a dedicated coverage banker.
+  # Slightly net buyers of EUR: European exporters convert foreign receivables into euros.
+  large_corporate:
+    client_share: 0.10
+    trades_per_month_lognorm: [2.899, 0.8]      # mean ~25 a month
+    ticket_eur_lognorm: [13.305, 0.9]           # median ~EUR 600k
+    pair_popularity: {EURUSD: 30, EURGBP: 18, EURJPY: 5, EURCHF: 8, EURSEK: 4, EURNOK: 3,
+                      EURDKK: 1.5, EURAUD: 2, EURCAD: 3, EURPLN: 6, EURCZK: 3, EURHUF: 3,
+                      EURZAR: 1.5, EURTRY: 2, EURMXN: 1.5}
+    buy_probability: 0.52
+    base_markup_bps: {g10_major: 3.5, g10_minor: 6.0, cee: 11.0, em: 18.0}
+    markup_noise_sigma: 0.20
+    client_markup_sigma: 0.30  # bilateral deals: similar treasuries pay quite different prices
+    compression_per_year: 0.05
+    adverse_selection_bps: [0.10, 0.40]
+    ops_cost_per_ticket_eur: 9.0
+    coverage_cost_eur_per_month: 3500
+    credit_weight: 0.8
+
+  # Mid-sized corporates: tickets in the low hundreds of thousands, sales-negotiated pricing.
+  mid_market:
+    client_share: 0.25
+    trades_per_month_lognorm: [2.591, 0.9]      # mean ~20 a month
+    ticket_eur_lognorm: [11.695, 0.9]           # median ~EUR 120k
+    pair_popularity: {EURUSD: 28, EURGBP: 18, EURJPY: 4, EURCHF: 8, EURSEK: 5, EURNOK: 3,
+                      EURDKK: 2, EURAUD: 2, EURCAD: 2, EURPLN: 8, EURCZK: 4, EURHUF: 4,
+                      EURZAR: 1.5, EURTRY: 3, EURMXN: 1.5}
+    buy_probability: 0.50
+    base_markup_bps: {g10_major: 6.0, g10_minor: 10.0, cee: 18.0, em: 30.0}
+    markup_noise_sigma: 0.25
+    client_markup_sigma: 0.25  # sales-negotiated deal by deal, but closer to a price schedule
+    compression_per_year: 0.03
+    adverse_selection_bps: [0.05, 0.30]
+    ops_cost_per_ticket_eur: 12.0
+    coverage_cost_eur_per_month: 1200
+    credit_weight: 1.0
+
+  # Small firms paying suppliers and receiving customer payments: small tickets, rate-card
+  # pricing that is rarely renegotiated (hence no compression), the highest cost to serve per
+  # euro traded. Net sellers of EUR, because importers pay foreign suppliers.
+  sme:
+    client_share: 0.32
+    trades_per_month_lognorm: [1.579, 1.0]      # mean ~8 a month
+    ticket_eur_lognorm: [9.903, 0.8]            # median ~EUR 20k
+    pair_popularity: {EURUSD: 30, EURGBP: 25, EURJPY: 2, EURCHF: 8, EURSEK: 4, EURNOK: 3,
+                      EURDKK: 2, EURAUD: 2, EURCAD: 2, EURPLN: 8, EURCZK: 3, EURHUF: 3,
+                      EURZAR: 1, EURTRY: 3, EURMXN: 1}
+    buy_probability: 0.48
+    base_markup_bps: {g10_major: 12.0, g10_minor: 19.0, cee: 32.0, em: 48.0}
+    markup_noise_sigma: 0.30
+    client_markup_sigma: 0.20  # rate card, rarely renegotiated: little room to differ
+    compression_per_year: 0.0
+    adverse_selection_bps: [0.02, 0.20]
+    ops_cost_per_ticket_eur: 15.0
+    coverage_cost_eur_per_month: 200
+    credit_weight: 1.5
+
+  # Real money: rebalancing and benchmark-driven flow in large tickets, keen on JPY and AUD.
+  # Some market impact when the dealer covers, so a little adverse selection.
+  asset_manager:
+    client_share: 0.10
+    trades_per_month_lognorm: [3.081, 0.8]      # mean ~30 a month
+    ticket_eur_lognorm: [14.221, 0.9]           # median ~EUR 1.5m
+    pair_popularity: {EURUSD: 32, EURGBP: 14, EURJPY: 14, EURCHF: 8, EURSEK: 5, EURNOK: 4,
+                      EURDKK: 1, EURAUD: 5, EURCAD: 4, EURPLN: 3, EURCZK: 2, EURHUF: 3,
+                      EURZAR: 2, EURTRY: 1, EURMXN: 2}
+    buy_probability: 0.50
+    base_markup_bps: {g10_major: 2.0, g10_minor: 3.5, cee: 7.0, em: 12.0}
+    markup_noise_sigma: 0.20
+    client_markup_sigma: 0.20  # several banks on the panel keep prices close to each other
+    compression_per_year: 0.06
+    adverse_selection_bps: [0.20, 0.50]
+    ops_cost_per_ticket_eur: 10.0
+    coverage_cost_eur_per_month: 3500
+    credit_weight: 0.6
+
+  # Fast money: huge ticket counts, razor-thin pricing, algorithmic and informed flow. The
+  # dealer's cover is systematically worse than mid after a hedge fund trade, which is
+  # adverse selection and the reason a tight markup is not the same as a profitable client.
+  hedge_fund:
+    client_share: 0.08
+    trades_per_month_lognorm: [5.249, 0.6]      # mean ~230 a month
+    ticket_eur_lognorm: [13.816, 0.8]           # median ~EUR 1m
+    pair_popularity: {EURUSD: 34, EURGBP: 14, EURJPY: 14, EURCHF: 9, EURSEK: 5, EURNOK: 5,
+                      EURDKK: 0.5, EURAUD: 4, EURCAD: 3, EURPLN: 2, EURCZK: 1, EURHUF: 3,
+                      EURZAR: 2, EURTRY: 3, EURMXN: 2}
+    buy_probability: 0.50
+    base_markup_bps: {g10_major: 1.0, g10_minor: 1.8, cee: 3.5, em: 6.0}
+    markup_noise_sigma: 0.15
+    client_markup_sigma: 0.20  # electronic and multi-dealer, but each fund has its own deal
+    compression_per_year: 0.18
+    adverse_selection_bps: [0.30, 0.80]
+    ops_cost_per_ticket_eur: 2.5
+    coverage_cost_eur_per_month: 3000
+    credit_weight: 1.25
+
+  # Fintechs and payment firms: very many small and medium tickets from automated payouts and
+  # collections, electronic, price-sensitive. Net sellers of EUR (payouts to foreign
+  # beneficiaries) with a heavy skew to CEE and EM corridors.
+  payment_institution:
+    client_share: 0.15
+    trades_per_month_lognorm: [5.296, 0.7]      # mean ~255 a month
+    ticket_eur_lognorm: [10.597, 1.0]           # median ~EUR 40k
+    pair_popularity: {EURUSD: 26, EURGBP: 22, EURJPY: 2, EURCHF: 4, EURSEK: 4, EURNOK: 3,
+                      EURDKK: 2, EURAUD: 3, EURCAD: 3, EURPLN: 10, EURCZK: 5, EURHUF: 5,
+                      EURZAR: 3, EURTRY: 4, EURMXN: 4}
+    buy_probability: 0.42
+    base_markup_bps: {g10_major: 3.0, g10_minor: 5.5, cee: 10.0, em: 17.0}
+    markup_noise_sigma: 0.15
+    client_markup_sigma: 0.20  # platform pricing schedules, negotiated contract by contract
+    compression_per_year: 0.12
+    adverse_selection_bps: [0.05, 0.30]
+    ops_cost_per_ticket_eur: 1.8
+    coverage_cost_eur_per_month: 1200
+    credit_weight: 1.25
+
+# ----------------------------------------------------------------------------------------------
+# Ticket bands. Larger tickets are priced tighter. Multiplier applies to base_markup_bps;
+# the 100k-500k band is the reference (1.0). max_ticket_eur is the EXCLUSIVE upper edge, so a
+# band covers [previous max, max) and a EUR 25,000 ticket falls in "25k-100k".
+# ----------------------------------------------------------------------------------------------
+ticket_bands:
+  - {label: "Under 25k",  max_ticket_eur: 25000,    markup_multiplier: 1.80}
+  - {label: "25k-100k",   max_ticket_eur: 100000,   markup_multiplier: 1.35}
+  - {label: "100k-500k",  max_ticket_eur: 500000,   markup_multiplier: 1.00}
+  - {label: "500k-2m",    max_ticket_eur: 2000000,  markup_multiplier: 0.80}
+  - {label: "2m-10m",     max_ticket_eur: 10000000, markup_multiplier: 0.65}
+  - {label: "10m+",       max_ticket_eur: null,     markup_multiplier: 0.55}
+
+# ----------------------------------------------------------------------------------------------
+# Volume tiers. A client gets the discount of the highest tier whose minimum is at or below its
+# expected annual EUR volume. Big clients negotiate tighter pricing: this is the main driver of
+# the volume-versus-margin pattern, alongside the ticket bands. Must start at 0.
+# ----------------------------------------------------------------------------------------------
+volume_tiers:
+  - {min_annual_volume_eur: 0,              discount_pct: 0.00}
+  - {min_annual_volume_eur: 25000000,       discount_pct: 0.05}
+  - {min_annual_volume_eur: 100000000,      discount_pct: 0.12}
+  - {min_annual_volume_eur: 500000000,      discount_pct: 0.20}
+  - {min_annual_volume_eur: 2000000000,     discount_pct: 0.30}
+  - {min_annual_volume_eur: 5000000000,     discount_pct: 0.40}
+
+# Old discounts agreed years ago and never repriced. Only a client onboarded before the window
+# can hold one. The discount stacks with the volume tier.
+legacy_deal:
+  probability: 0.20
+  discount_pct: 0.25
+
+# ----------------------------------------------------------------------------------------------
+# Cost to serve (spec section 5.5). Capital charge per trade =
+#   notional x capital_charge_bps / 10,000 x segment credit_weight x settlement_weight
+# ----------------------------------------------------------------------------------------------
+cost:
+  # An INTERNAL charge for settlement risk and the use of the client's credit line, in bps of
+  # notional at credit weight 1.0 and settlement weight 1.0. It is not regulatory capital: spot
+  # FX settles in two days and attracts little of that. The desk prices the line it ties up and
+  # the chance a payment fails. Per trade it is 0.10 bps x the segment's credit weight x the
+  # pair's settlement weight: 1.0 for CLS (payment versus payment), 2.5 for bilateral
+  # settlement, so an average client's EURTRY ticket costs 0.25 bps and its EURUSD one 0.10.
+  capital_charge_bps: 0.10
+  settlement_weight_cls: 1.0       # payment-versus-payment through CLS: baseline
+  settlement_weight_non_cls: 2.5   # bilateral settlement leaves principal at risk (PLN, CZK, TRY)
+  # Minimum economic margin (bps of volume) for a client to earn its place. Clients below it
+  # with large volume are the "volume traps" of the headline analysis. 0.75 is an ILLUSTRATIVE
+  # builder default, chosen before any trades were generated (commit 90fef95), not fitted to the
+  # book; the owner sets the hurdle independently at calibration.
+  hurdle_rate_bps: 0.75

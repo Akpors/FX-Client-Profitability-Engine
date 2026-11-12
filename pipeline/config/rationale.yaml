@@ -1,0 +1,59 @@
+# One-line "why" for every parameter on the calibration sheet (docs/methodology/parameter-sheet.md).
+#
+# Each text says why the builder's DEFAULT is plausible for a European spot-FX dealer. They are
+# illustrative defaults, not market data, and none comes from a real firm or client. The owner
+# overwrites values from experience at the calibration gate (spec section 11.1). Lines name roles
+# ("hedge funds", "SMEs") rather than figures, so they stay true when a value moves a little; if
+# the owner reverses an ordering, reword the line too, then run `make param-sheet`.
+#
+# The sheet must fit one printed A4 page, so it shows each group of parameters as a grid and gives
+# one reason per grid row. Key scheme (a flat mapping; `make param-sheet` fails and names the
+# first missing key):
+#
+#   markup                     the four markup rows (one per liquidity tier) across all segments
+#   compression                compression_per_year
+#   adverse_selection          adverse_selection_bps (mean and sd)
+#   ops_cost                   ops_cost_per_ticket_eur
+#   coverage                   coverage_cost_eur_per_month
+#   credit_weight              credit_weight
+#   client_markup_sigma        client_markup_sigma, the per-client negotiation scatter
+#   ticket_band.edges          max_ticket_eur of each band
+#   ticket_band.multiplier     markup_multiplier of each band
+#   volume_tier.threshold      min_annual_volume_eur of each tier
+#   volume_tier.discount       discount_pct of each tier
+#   cover_half_spread          cover_half_spread_bps (all four liquidity tiers, one row)
+#   settlement_weight.cls      cost.settlement_weight_cls
+#   settlement_weight.non_cls  cost.settlement_weight_non_cls
+#   capital_charge_bps         cost.capital_charge_bps
+#   hurdle_rate_bps            cost.hurdle_rate_bps
+#   legacy_deal.probability    legacy_deal.probability
+#   legacy_deal.discount_pct   legacy_deal.discount_pct
+#
+# Limits: a grid reason prints as "- **Label:** text" and must stay within 110 characters; a row
+# of the cover and capital table (label, default, blank and Why) must stay within 130, which
+# leaves the Why about 60 to 85 characters depending on the label.
+# test_sheet_fits_one_page_70_lines_8_columns_110_chars fails the build if the sheet outgrows them.
+
+# --- Segment grid -------------------------------------------------------------------------------
+markup: "Wider as liquidity thins (cover cost, inventory risk); hedge funds tightest, SMEs widest"
+compression: "None for SME rate cards, slow for corporates and asset managers, fast for shopped flow"
+adverse_selection: "Informed fund flow costs most, then asset managers; the rest barely moves cover"
+ops_cost: "Highest for SMEs and mid-market (manual handling, queries); lowest for automated flow"
+coverage: "Own banker for corporates, asset managers, funds; shared for mid-market; little for SMEs"
+credit_weight: "1.0 is the average counterparty: real money and big corporates below, SMEs highest"
+client_markup_sigma: "Each client's own price level: widest for bilateral deals, narrow for rate cards"
+
+# --- Ticket bands and volume tiers --------------------------------------------------------------
+ticket_band.edges: "Round sizes where handling cost and the way a client shops the price change"
+ticket_band.multiplier: "Bigger tickets are cheaper to handle and shopped harder, so bands price tighter"
+volume_tier.threshold: "Spaced so each step is a clearly bigger relationship, small client to top flow"
+volume_tier.discount: "Bigger relationships negotiate harder and rivals bid for them, so discounts rise"
+
+# --- Cover, capital, hurdle and legacy deals ----------------------------------------------------
+cover_half_spread: "Crossing the interbank touch to cover; wider in thin pairs"
+settlement_weight.cls: "Payment-versus-payment through CLS removes principal risk: the baseline"
+settlement_weight.non_cls: "Bilateral settlement leaves principal at risk: a higher weight"
+capital_charge_bps: "Internal settlement-risk and credit-line charge, not regulatory capital"
+hurdle_rate_bps: "Illustrative builder default, chosen before any trades; owner sets it independently"
+legacy_deal.probability: "Old discounts are rarely repriced, so some clients onboarded earlier still hold one"
+legacy_deal.discount_pct: "A concession from winning the mandate years ago, stacking on the volume tier"

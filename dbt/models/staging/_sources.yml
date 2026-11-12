@@ -1,0 +1,23 @@
+version: 2
+
+sources:
+  - name: raw
+    description: >
+      Tables written by the Python pipeline (`make pipeline`, `fxengine run-all`). They are
+      replaced wholesale on every run and carry no business rules beyond NOT NULL.
+    schema: raw
+    tables:
+      - name: ecb_rates
+        description: ECB euro reference rates, one row per fixing date and currency, as units of the quote currency per 1 EUR.
+      - name: clients
+        description: The synthetic client book, one row per client.
+      - name: trades
+        description: The synthetic spot trade book, one row per trade.
+      - name: pairs
+        description: Currency-pair reference data, including the CLS-based settlement weight.
+      - name: ticket_bands
+        description: Ticket-size bands in EUR, [min, max), with the markup multiplier the generator priced them with.
+      - name: cost_assumptions
+        description: Illustrative cost-to-serve assumptions by client segment.
+      - name: parameters
+        description: Named scalar parameters of the generator and the cost model.
