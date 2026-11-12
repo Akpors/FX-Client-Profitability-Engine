@@ -1,0 +1,195 @@
+version: 2
+
+# The marts are what the dashboard, the pricing engine and the notebooks read. Formulas, grains
+# and the desk reading of every column: docs/methodology/metrics.md, sections 2 to 4.
+models:
+  - name: fct_trades
+    description: >
+      The trade fact table: int_trades_enriched materialised in the marts schema, one row per
+      trade with its economics (gross P&L, margin, benchmark spread, cover slippage, ops cost
+      and capital charge). Formulas: metrics.md section 1.
+    columns:
+      - name: trade_id
+        data_tests: [unique, not_null]
+      - name: client_id
+        data_tests: [not_null]
+      - name: notional_eur
+        data_tests: [not_null]
+      - name: gross_pnl_eur
+        data_tests: [not_null]
+
+  - name: fct_trades_brief_view
+    description: >
+      The trade table in the exact column layout of the original brief, as a view on fct_trades.
+      buy_rate and sell_rate are the dealer's two legs: on a client BUY of EUR the dealer buys
+      EUR in the market at cover_rate and sells it to the client at client_rate; on a client
+      SELL it buys from the client at client_rate and sells in the market at cover_rate. So
+      (sell_rate − buy_rate) × volume is always the dealer's quote-currency P&L, and pnl is that
+      amount in EUR. client is the client name; client_id is on fct_trades.
+    columns:
+      - name: client
+        description: Client name (a code such as `Client LC-014`).
+        data_tests: [not_null]
+      - name: trade
+        description: Trade ID.
+        data_tests: [unique, not_null]
+      - name: buy_rate
+        description: Rate at which the dealer bought EUR (cover on a client BUY, client rate on a client SELL).
+        data_tests: [not_null]
+      - name: sell_rate
+        description: Rate at which the dealer sold EUR (client rate on a client BUY, cover on a client SELL).
+        data_tests: [not_null]
+      - name: benchmark_rate
+        description: Same-day ECB reference rate, quote currency per 1 EUR.
+      - name: volume
+        description: Notional in EUR.
+      - name: timestamp
+        description: Trade timestamp (trade_ts).
+      - name: pnl
+        description: Dealer gross P&L in EUR (gross_pnl_eur).
+
+  - name: dim_clients
+    description: >
+      One row per client in the book: the client attributes from the generator plus the first
+      and last trade dates in the window (NULL for a client that has not traded).
+    columns:
+      - name: client_id
+        data_tests: [unique, not_null]
+      - name: client_name
+        data_tests: [not_null]
+      - name: segment
+        data_tests: [not_null]
+
+  - name: mart_client_profitability
+    description: >
+      One row per client in stg_clients over the full window: volume, gross spread, costs,
+      economic contribution and margins, the per-trade contribution distribution, ticket size,
+      shares of the book, execution quality and the peer benchmark. Clients with no trades in
+      the window have zero amounts and NULL margins and per-trade figures. Metrics 1-7, 9, 10;
+      see metrics.md section 3.
+    columns:
+      - name: client_id
+        data_tests: [unique, not_null]
+      - name: client_name
+        data_tests: [not_null]
+      - name: segment
+        data_tests: [not_null]
+      - name: trade_count
+        data_tests: [not_null]
+      - name: volume_eur
+        data_tests: [not_null]
+      - name: revenue_eur
+        data_tests: [not_null]
+      - name: ops_cost_eur
+        data_tests: [not_null]
+      - name: capital_charge_eur
+        data_tests: [not_null]
+      - name: coverage_cost_eur
+        data_tests: [not_null]
+      - name: economic_contribution_eur
+        data_tests: [not_null]
+      - name: volume_share
+        data_tests: [not_null]
+      - name: revenue_share
+        data_tests: [not_null]
+      - name: contribution_share
+        description: Can be negative (a client whose costs exceed its revenue).
+        data_tests: [not_null]
+      - name: share_gap
+        description: volume_share − contribution_share; positive means the client brings more volume than contribution.
+        data_tests: [not_null]
+      - name: gross_margin_bps
+        description: revenue_eur / volume_eur × 10,000; NULL for a client with no volume.
+      - name: economic_margin_bps
+        description: economic_contribution_eur / volume_eur × 10,000; NULL for a client with no volume.
+      - name: peer_median_gross_margin_bps
+        description: Median gross_margin_bps of clients with the same segment and modal_ticket_band, the client included.
+      - name: peer_group_size
+        description: Number of clients in that peer group; 1 means the benchmark is the client's own margin.
+
+  - name: mart_currency_profitability
+    description: >
+      One row per currency pair in the pair reference: volume, gross spread, benchmark spread,
+      cover slippage, per-trade costs and contribution excluding coverage. Coverage cost is a
+      client-relationship cost with no currency, so it is not allocated here (metrics.md
+      section 4). Metrics 1-3, 5, 10.
+    columns:
+      - name: currency_pair
+        data_tests: [unique, not_null]
+      - name: trade_count
+        data_tests: [not_null]
+      - name: volume_eur
+        data_tests: [not_null]
+      - name: revenue_eur
+        data_tests: [not_null]
+      - name: ops_cost_eur
+        data_tests: [not_null]
+      - name: capital_charge_eur
+        data_tests: [not_null]
+      - name: contribution_ex_coverage_eur
+        data_tests: [not_null]
+
+unit_tests:
+  # The brief's layout puts the dealer's two legs side by side. Both trades are the EURUSD
+  # examples of metrics.md section 1.7: the dealer earns 0.0010 USD per EUR either way, so
+  # sell_rate − buy_rate is +0.0010 on both rows. A client BUY: the dealer buys EUR in the market
+  # at the cover (1.1000) and sells it to the client (1.1010). A client SELL: the dealer buys
+  # from the client (1.0990) and sells in the market at the cover (1.1000).
+  - name: fct_trades_brief_view_maps_legs_by_side
+    model: fct_trades_brief_view
+    given:
+      - input: ref('fct_trades')
+        format: dict
+        rows:
+          - {trade_id: T-BUY, client_id: C-1, trade_ts: '2025-03-14 10:15:00+00', currency_pair: EURUSD, client_side: BUY, notional_eur: 1000000, client_rate: 1.1010, cover_rate: 1.1000, benchmark_rate: 1.1000, gross_pnl_eur: 909.090909}
+          - {trade_id: T-SELL, client_id: C-1, trade_ts: '2025-03-14 11:30:00+00', currency_pair: EURUSD, client_side: SELL, notional_eur: 1000000, client_rate: 1.0990, cover_rate: 1.1000, benchmark_rate: 1.1000, gross_pnl_eur: 909.090909}
+      - input: ref('dim_clients')
+        format: dict
+        rows:
+          - {client_id: C-1, client_name: Client MM-001}
+    expect:
+      format: dict
+      rows:
+        - {client: Client MM-001, trade: T-BUY, currency_pair: EURUSD, buy_rate: 1.1000, sell_rate: 1.1010, benchmark_rate: 1.1000, volume: 1000000, timestamp: '2025-03-14 10:15:00+00', pnl: 909.0909}
+        - {client: Client MM-001, trade: T-SELL, currency_pair: EURUSD, buy_rate: 1.0990, sell_rate: 1.1000, benchmark_rate: 1.1000, volume: 1000000, timestamp: '2025-03-14 11:30:00+00', pnl: 909.0909}
+
+  # Three mid-market clients, hand-checkable (metrics.md section 3.11).
+  # A: two trades, one per band, so the modal band is a 1-1 tie, broken by volume: 100k-500k.
+  #    Revenue 500 on EUR 250k = 20 bps; contribution 500 − 20 − 2 − 100 = 378 = 15.12 bps.
+  #    Per trade, coverage 100 / 2 = 50 each: 300 − 10 − 1 − 50 = 239 and 200 − 10 − 1 − 50 = 139,
+  #    so median 189, P10 149, P90 229. Volume-weighted benchmark spread (2 × 200k + 4 × 50k) / 250k = 2.4.
+  # B: one 100k-500k trade, 10 bps. Peer median of A and B (same segment and band) = 15 bps.
+  # C: onboarded after the window: no months, no trades. Zero amounts, NULL margins and peers.
+  # Contribution share: A 378 / 367.5 = 1.0286, B −10.5 / 367.5 = −0.0286. A negative share,
+  # and a share above 1, from the same book.
+  - name: mart_client_profitability_core_metrics
+    model: mart_client_profitability
+    given:
+      - input: ref('dim_clients')
+        format: dict
+        rows:
+          - {client_id: A, client_name: Client A, segment: mid_market}
+          - {client_id: B, client_name: Client B, segment: mid_market}
+          - {client_id: C, client_name: Client C, segment: mid_market}
+      - input: ref('int_client_month')
+        format: dict
+        rows:
+          - {client_id: A, trade_count: 2, volume_eur: 250000, revenue_eur: 500, ops_cost_eur: 20, capital_charge_eur: 2, coverage_cost_eur: 100, economic_contribution_eur: 378}
+          - {client_id: B, trade_count: 1, volume_eur: 100000, revenue_eur: 100, ops_cost_eur: 10, capital_charge_eur: 0.5, coverage_cost_eur: 100, economic_contribution_eur: -10.5}
+      - input: ref('fct_trades')
+        format: dict
+        rows:
+          - {client_id: A, notional_eur: 200000, ticket_band: 100k-500k, gross_pnl_eur: 300, ops_cost_eur: 10, capital_charge_eur: 1, benchmark_spread_bps: 2, cover_slippage_bps: 0.1}
+          - {client_id: A, notional_eur: 50000, ticket_band: 25k-100k, gross_pnl_eur: 200, ops_cost_eur: 10, capital_charge_eur: 1, benchmark_spread_bps: 4, cover_slippage_bps: 0.6}
+          - {client_id: B, notional_eur: 100000, ticket_band: 100k-500k, gross_pnl_eur: 100, ops_cost_eur: 10, capital_charge_eur: 0.5, benchmark_spread_bps: 1, cover_slippage_bps: 0}
+      - input: ref('stg_ticket_bands')
+        format: dict
+        rows:
+          - {label: 25k-100k, min_ticket_eur: 25000}
+          - {label: 100k-500k, min_ticket_eur: 100000}
+    expect:
+      format: dict
+      rows:
+        - {client_id: A, trade_count: 2, volume_eur: 250000, gross_margin_bps: 20, economic_contribution_eur: 378, economic_margin_bps: 15.12, contribution_per_trade_eur: 189, p10_contribution_per_trade_eur: 149, median_contribution_per_trade_eur: 189, p90_contribution_per_trade_eur: 229, avg_ticket_eur: 125000, median_ticket_eur: 125000, modal_ticket_band: 100k-500k, avg_benchmark_spread_bps: 2.4, avg_cover_slippage_bps: 0.2, volume_share: 0.7143, revenue_share: 0.8333, contribution_share: 1.0286, share_gap: -0.3143, peer_median_gross_margin_bps: 15, peer_group_size: 2}
+        - {client_id: B, trade_count: 1, volume_eur: 100000, gross_margin_bps: 10, economic_contribution_eur: -10.5, economic_margin_bps: -1.05, contribution_per_trade_eur: -10.5, p10_contribution_per_trade_eur: -10.5, median_contribution_per_trade_eur: -10.5, p90_contribution_per_trade_eur: -10.5, avg_ticket_eur: 100000, median_ticket_eur: 100000, modal_ticket_band: 100k-500k, avg_benchmark_spread_bps: 1, avg_cover_slippage_bps: 0, volume_share: 0.2857, revenue_share: 0.1667, contribution_share: -0.0286, share_gap: 0.3143, peer_median_gross_margin_bps: 15, peer_group_size: 2}
+        - {client_id: C, trade_count: 0, volume_eur: 0, gross_margin_bps: null, economic_contribution_eur: 0, economic_margin_bps: null, contribution_per_trade_eur: null, p10_contribution_per_trade_eur: null, median_contribution_per_trade_eur: null, p90_contribution_per_trade_eur: null, avg_ticket_eur: null, median_ticket_eur: null, modal_ticket_band: null, avg_benchmark_spread_bps: null, avg_cover_slippage_bps: null, volume_share: 0, revenue_share: 0, contribution_share: 0, share_gap: 0, peer_median_gross_margin_bps: null, peer_group_size: null}

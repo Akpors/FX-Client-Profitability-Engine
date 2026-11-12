@@ -27,6 +27,7 @@ models:
           - not_null
           - accepted_values:
               values: [1, -1]
+              quote: false
       - name: segment
         description: Client segment, joined from the client book.
         data_tests:
@@ -51,6 +52,46 @@ models:
         description: Settlement-risk capital charge in EUR (a missing capital_charge_bps parameter shows up here as NULL).
         data_tests:
           - not_null
+
+  - name: int_window
+    description: >
+      The analysis window as whole calendar months, one row: window_start is the first day of
+      the first trade's month, window_end the last day of the last trade's month. The single
+      definition of the window; int_client_month and the headline KPIs read it from here.
+    columns:
+      - name: window_start
+        data_tests: [not_null]
+      - name: window_end
+        data_tests: [not_null]
+
+  - name: int_client_month
+    description: >
+      One row per client per month on the book, from greatest(onboarding month, window start)
+      to the window end, including months with no trades (zero amounts, full coverage cost).
+      trade_count, volume, revenue, ops cost and capital charge are sums over the client's
+      trades in the month; coverage_cost_eur is the segment's monthly coverage cost;
+      economic_contribution_eur = revenue − ops − capital − coverage. Materialised as a table
+      because every client mart reads it.
+    data_tests:
+      - unique:
+          column_name: "client_id || '|' || month"
+    columns:
+      - name: client_id
+        data_tests: [not_null]
+      - name: month
+        description: First day of the calendar month.
+        data_tests: [not_null]
+      - name: segment
+        data_tests: [not_null]
+      - name: trade_count
+        data_tests: [not_null]
+      - name: volume_eur
+        data_tests: [not_null]
+      - name: coverage_cost_eur
+        description: The segment's coverage_cost_eur_per_month (NULL would mean a segment missing from the cost assumptions).
+        data_tests: [not_null]
+      - name: economic_contribution_eur
+        data_tests: [not_null]
 
 unit_tests:
   # A client BUY of EUR. The dealer sells EUR to the client at 1.1010 and buys it back in the
@@ -221,3 +262,32 @@ unit_tests:
         - {trade_id: T-2, ticket_band: 25k-100k}
         - {trade_id: T-3, ticket_band: 25k-100k}
         - {trade_id: T-4, ticket_band: 100k+}
+
+  # A client onboarded on 20 Feb 2025 into a Jan-Mar 2025 window is on the book from February:
+  # two rows, not three. March has no trades and still carries the full monthly coverage cost,
+  # so its contribution is −1,200. February: 1,000 − 2 × 12 − 5 − 1,200 = −229.
+  - name: int_client_month_onboarding_and_zero_trade_months
+    model: int_client_month
+    given:
+      - input: ref('int_window')
+        format: dict
+        rows:
+          - {window_start: '2025-01-01', window_end: '2025-03-31'}
+      - input: ref('stg_clients')
+        format: dict
+        rows:
+          - {client_id: C-1, segment: mid_market, onboarded_date: '2025-02-20'}
+      - input: ref('stg_cost_assumptions')
+        format: dict
+        rows:
+          - {segment: mid_market, coverage_cost_eur_per_month: 1200}
+      - input: ref('int_trades_enriched')
+        format: dict
+        rows:
+          - {client_id: C-1, trade_month: '2025-02-01', notional_eur: 600000, gross_pnl_eur: 700, ops_cost_eur: 12, capital_charge_eur: 3}
+          - {client_id: C-1, trade_month: '2025-02-01', notional_eur: 400000, gross_pnl_eur: 300, ops_cost_eur: 12, capital_charge_eur: 2}
+    expect:
+      format: dict
+      rows:
+        - {client_id: C-1, month: '2025-02-01', trade_count: 2, volume_eur: 1000000, revenue_eur: 1000, ops_cost_eur: 24, capital_charge_eur: 5, coverage_cost_eur: 1200, economic_contribution_eur: -229}
+        - {client_id: C-1, month: '2025-03-01', trade_count: 0, volume_eur: 0, revenue_eur: 0, ops_cost_eur: 0, capital_charge_eur: 0, coverage_cost_eur: 1200, economic_contribution_eur: -1200}
