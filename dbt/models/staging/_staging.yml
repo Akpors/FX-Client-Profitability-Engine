@@ -3,7 +3,13 @@ version: 2
 # Staging models rename and cast only. No business logic lives here.
 models:
   - name: stg_ecb_rates
-    description: ECB euro reference rates. `ecb_rate` is units of `quote_ccy` per 1 EUR.
+    description: >
+      ECB euro reference rates, one row per fixing date and currency. `ecb_rate` is units of
+      `quote_ccy` per 1 EUR.
+    data_tests:
+      # One fix per date and currency, so the benchmark join can never fan a trade out.
+      - unique:
+          column_name: "rate_date || '|' || quote_ccy"
     columns:
       - name: rate_date
         data_tests: [not_null]

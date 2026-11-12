@@ -7,6 +7,13 @@
 
       gross_margin_bps = Σ gross_pnl_eur / Σ notional_eur x 10,000      (ratio of sums)
       compression_slope_bps_per_year = regr_slope(gross_margin_bps, month_index) x 12
+      compression_pct_per_year = compression_slope_bps_per_year
+                                 / |mean of the cell's monthly gross_margin_bps| x 100
+
+  The percentage is the relative rate of margin decline: the bps slope as a share of the cell's
+  own average margin level, so segments whose margins differ ~80x can be compared. Dividing by
+  the absolute mean keeps the sign of the slope (negative = compressing) even where the mean
+  margin is negative, and nullif makes a zero mean give NULL rather than an error.
 
   month_index counts whole months from the window start (int_window), so a month with no trades
   leaves a gap in the index instead of closing it up.
@@ -57,6 +64,7 @@ with_slope as (
     select
         *,
         count(*) over per_cell as n_months,
+        avg(gross_margin_bps) over per_cell as mean_margin_bps,
         regr_slope(gross_margin_bps, month_index) over per_cell::numeric * 12
             as compression_slope_bps_per_year
     from with_margin
@@ -74,6 +82,8 @@ select
     volume_eur,
     revenue_eur,
     gross_margin_bps,
-    compression_slope_bps_per_year
+    compression_slope_bps_per_year,
+    compression_slope_bps_per_year / nullif(abs(mean_margin_bps), 0) * 100
+        as compression_pct_per_year
 from with_slope
 where n_months >= {{ min_months }}

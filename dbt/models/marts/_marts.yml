@@ -201,8 +201,9 @@ models:
     description: >
       Spread compression (metric 11): realised gross margin in bps by month, segment and currency
       pair, for months that have trades, with the trend slope per segment x pair in bps per year
-      (negative means the margin is compressing). Only combinations with trades in at least 6
-      distinct months are kept, so the slope is always defined. See metrics.md section 7.
+      and as a percentage of the cell's mean margin (negative means the margin is compressing).
+      Only combinations with trades in at least 6 distinct months are kept, so the slope is always
+      defined. See metrics.md section 7.
     data_tests:
       - unique:
           column_name: "month || '|' || segment || '|' || currency_pair"
@@ -228,6 +229,13 @@ models:
       - name: compression_slope_bps_per_year
         description: Ordinary least-squares slope of gross_margin_bps on month_index, x 12, repeated on each row of the segment x pair.
         data_tests: [not_null]
+      - name: compression_pct_per_year
+        description: >
+          The relative rate of margin decline, % a year - compression_slope_bps_per_year divided by
+          the absolute mean of the segment x pair's monthly gross_margin_bps, x 100, repeated on
+          each row. Negative means compressing. Comparable across segments whose margins differ
+          by orders of magnitude, unlike the bps slope. NULL when the mean margin is exactly 0, and
+          unstable when it is close to 0, so no not_null test.
 
   - name: mart_headline_kpis
     description: >
@@ -411,6 +419,13 @@ unit_tests:
   #  hedge_fund EURUSD, six months at a flat 3 bps: slope 0. Same pair, different segment, so it
   #     is a separate regression.
   #  sme EURGBP, five months: below the six-month minimum, so it has no rows at all.
+  #  compression_pct_per_year = slope / |mean monthly margin| x 100. sme EURUSD: the mean of
+  #     10, 9, 7, 6, 5, 4 is 41 / 6 = 6.8333, so -12 / 6.8333 x 100 = -175.6098 (a steep toy
+  #     decline). hedge_fund EURUSD: 0 / 3 = 0.
+  #  payment_institution EURUSD, six months at exactly 0 bps: slope 0 and mean 0, so the
+  #     percentage is NULL (nullif), not a division error.
+  #  hedge_fund EURGBP, losing -1 to -6 bps: slope -12 and mean -3.5. Dividing by |mean| keeps
+  #     the sign of the slope, so a widening loss reads as -342.8571, not as +342.8571.
   - name: mart_spread_compression_slope_and_minimum_months
     model: mart_spread_compression
     given:
@@ -439,21 +454,45 @@ unit_tests:
           - {segment: sme, currency_pair: EURGBP, trade_month: '2025-03-01', notional_eur: 1000000, gross_pnl_eur: 800}
           - {segment: sme, currency_pair: EURGBP, trade_month: '2025-04-01', notional_eur: 1000000, gross_pnl_eur: 800}
           - {segment: sme, currency_pair: EURGBP, trade_month: '2025-05-01', notional_eur: 1000000, gross_pnl_eur: 800}
+          - {segment: payment_institution, currency_pair: EURUSD, trade_month: '2025-01-01', notional_eur: 1000000, gross_pnl_eur: 0}
+          - {segment: payment_institution, currency_pair: EURUSD, trade_month: '2025-02-01', notional_eur: 1000000, gross_pnl_eur: 0}
+          - {segment: payment_institution, currency_pair: EURUSD, trade_month: '2025-03-01', notional_eur: 1000000, gross_pnl_eur: 0}
+          - {segment: payment_institution, currency_pair: EURUSD, trade_month: '2025-04-01', notional_eur: 1000000, gross_pnl_eur: 0}
+          - {segment: payment_institution, currency_pair: EURUSD, trade_month: '2025-05-01', notional_eur: 1000000, gross_pnl_eur: 0}
+          - {segment: payment_institution, currency_pair: EURUSD, trade_month: '2025-06-01', notional_eur: 1000000, gross_pnl_eur: 0}
+          - {segment: hedge_fund, currency_pair: EURGBP, trade_month: '2025-01-01', notional_eur: 1000000, gross_pnl_eur: -100}
+          - {segment: hedge_fund, currency_pair: EURGBP, trade_month: '2025-02-01', notional_eur: 1000000, gross_pnl_eur: -200}
+          - {segment: hedge_fund, currency_pair: EURGBP, trade_month: '2025-03-01', notional_eur: 1000000, gross_pnl_eur: -300}
+          - {segment: hedge_fund, currency_pair: EURGBP, trade_month: '2025-04-01', notional_eur: 1000000, gross_pnl_eur: -400}
+          - {segment: hedge_fund, currency_pair: EURGBP, trade_month: '2025-05-01', notional_eur: 1000000, gross_pnl_eur: -500}
+          - {segment: hedge_fund, currency_pair: EURGBP, trade_month: '2025-06-01', notional_eur: 1000000, gross_pnl_eur: -600}
     expect:
       format: dict
       rows:
-        - {segment: sme, currency_pair: EURUSD, month: '2025-01-01', month_index: 0, n_months: 6, volume_eur: 4000000, gross_margin_bps: 10, compression_slope_bps_per_year: -12}
-        - {segment: sme, currency_pair: EURUSD, month: '2025-02-01', month_index: 1, n_months: 6, volume_eur: 1000000, gross_margin_bps: 9, compression_slope_bps_per_year: -12}
-        - {segment: sme, currency_pair: EURUSD, month: '2025-04-01', month_index: 3, n_months: 6, volume_eur: 1000000, gross_margin_bps: 7, compression_slope_bps_per_year: -12}
-        - {segment: sme, currency_pair: EURUSD, month: '2025-05-01', month_index: 4, n_months: 6, volume_eur: 1000000, gross_margin_bps: 6, compression_slope_bps_per_year: -12}
-        - {segment: sme, currency_pair: EURUSD, month: '2025-06-01', month_index: 5, n_months: 6, volume_eur: 1000000, gross_margin_bps: 5, compression_slope_bps_per_year: -12}
-        - {segment: sme, currency_pair: EURUSD, month: '2025-07-01', month_index: 6, n_months: 6, volume_eur: 1000000, gross_margin_bps: 4, compression_slope_bps_per_year: -12}
-        - {segment: hedge_fund, currency_pair: EURUSD, month: '2025-01-01', month_index: 0, n_months: 6, volume_eur: 1000000, gross_margin_bps: 3, compression_slope_bps_per_year: 0}
-        - {segment: hedge_fund, currency_pair: EURUSD, month: '2025-02-01', month_index: 1, n_months: 6, volume_eur: 1000000, gross_margin_bps: 3, compression_slope_bps_per_year: 0}
-        - {segment: hedge_fund, currency_pair: EURUSD, month: '2025-03-01', month_index: 2, n_months: 6, volume_eur: 1000000, gross_margin_bps: 3, compression_slope_bps_per_year: 0}
-        - {segment: hedge_fund, currency_pair: EURUSD, month: '2025-04-01', month_index: 3, n_months: 6, volume_eur: 1000000, gross_margin_bps: 3, compression_slope_bps_per_year: 0}
-        - {segment: hedge_fund, currency_pair: EURUSD, month: '2025-05-01', month_index: 4, n_months: 6, volume_eur: 1000000, gross_margin_bps: 3, compression_slope_bps_per_year: 0}
-        - {segment: hedge_fund, currency_pair: EURUSD, month: '2025-06-01', month_index: 5, n_months: 6, volume_eur: 1000000, gross_margin_bps: 3, compression_slope_bps_per_year: 0}
+        - {segment: sme, currency_pair: EURUSD, month: '2025-01-01', month_index: 0, n_months: 6, volume_eur: 4000000, gross_margin_bps: 10, compression_slope_bps_per_year: -12, compression_pct_per_year: -175.6098}
+        - {segment: sme, currency_pair: EURUSD, month: '2025-02-01', month_index: 1, n_months: 6, volume_eur: 1000000, gross_margin_bps: 9, compression_slope_bps_per_year: -12, compression_pct_per_year: -175.6098}
+        - {segment: sme, currency_pair: EURUSD, month: '2025-04-01', month_index: 3, n_months: 6, volume_eur: 1000000, gross_margin_bps: 7, compression_slope_bps_per_year: -12, compression_pct_per_year: -175.6098}
+        - {segment: sme, currency_pair: EURUSD, month: '2025-05-01', month_index: 4, n_months: 6, volume_eur: 1000000, gross_margin_bps: 6, compression_slope_bps_per_year: -12, compression_pct_per_year: -175.6098}
+        - {segment: sme, currency_pair: EURUSD, month: '2025-06-01', month_index: 5, n_months: 6, volume_eur: 1000000, gross_margin_bps: 5, compression_slope_bps_per_year: -12, compression_pct_per_year: -175.6098}
+        - {segment: sme, currency_pair: EURUSD, month: '2025-07-01', month_index: 6, n_months: 6, volume_eur: 1000000, gross_margin_bps: 4, compression_slope_bps_per_year: -12, compression_pct_per_year: -175.6098}
+        - {segment: hedge_fund, currency_pair: EURUSD, month: '2025-01-01', month_index: 0, n_months: 6, volume_eur: 1000000, gross_margin_bps: 3, compression_slope_bps_per_year: 0, compression_pct_per_year: 0}
+        - {segment: hedge_fund, currency_pair: EURUSD, month: '2025-02-01', month_index: 1, n_months: 6, volume_eur: 1000000, gross_margin_bps: 3, compression_slope_bps_per_year: 0, compression_pct_per_year: 0}
+        - {segment: hedge_fund, currency_pair: EURUSD, month: '2025-03-01', month_index: 2, n_months: 6, volume_eur: 1000000, gross_margin_bps: 3, compression_slope_bps_per_year: 0, compression_pct_per_year: 0}
+        - {segment: hedge_fund, currency_pair: EURUSD, month: '2025-04-01', month_index: 3, n_months: 6, volume_eur: 1000000, gross_margin_bps: 3, compression_slope_bps_per_year: 0, compression_pct_per_year: 0}
+        - {segment: hedge_fund, currency_pair: EURUSD, month: '2025-05-01', month_index: 4, n_months: 6, volume_eur: 1000000, gross_margin_bps: 3, compression_slope_bps_per_year: 0, compression_pct_per_year: 0}
+        - {segment: hedge_fund, currency_pair: EURUSD, month: '2025-06-01', month_index: 5, n_months: 6, volume_eur: 1000000, gross_margin_bps: 3, compression_slope_bps_per_year: 0, compression_pct_per_year: 0}
+        - {segment: payment_institution, currency_pair: EURUSD, month: '2025-01-01', month_index: 0, n_months: 6, volume_eur: 1000000, gross_margin_bps: 0, compression_slope_bps_per_year: 0, compression_pct_per_year: null}
+        - {segment: payment_institution, currency_pair: EURUSD, month: '2025-02-01', month_index: 1, n_months: 6, volume_eur: 1000000, gross_margin_bps: 0, compression_slope_bps_per_year: 0, compression_pct_per_year: null}
+        - {segment: payment_institution, currency_pair: EURUSD, month: '2025-03-01', month_index: 2, n_months: 6, volume_eur: 1000000, gross_margin_bps: 0, compression_slope_bps_per_year: 0, compression_pct_per_year: null}
+        - {segment: payment_institution, currency_pair: EURUSD, month: '2025-04-01', month_index: 3, n_months: 6, volume_eur: 1000000, gross_margin_bps: 0, compression_slope_bps_per_year: 0, compression_pct_per_year: null}
+        - {segment: payment_institution, currency_pair: EURUSD, month: '2025-05-01', month_index: 4, n_months: 6, volume_eur: 1000000, gross_margin_bps: 0, compression_slope_bps_per_year: 0, compression_pct_per_year: null}
+        - {segment: payment_institution, currency_pair: EURUSD, month: '2025-06-01', month_index: 5, n_months: 6, volume_eur: 1000000, gross_margin_bps: 0, compression_slope_bps_per_year: 0, compression_pct_per_year: null}
+        - {segment: hedge_fund, currency_pair: EURGBP, month: '2025-01-01', month_index: 0, n_months: 6, volume_eur: 1000000, gross_margin_bps: -1, compression_slope_bps_per_year: -12, compression_pct_per_year: -342.8571}
+        - {segment: hedge_fund, currency_pair: EURGBP, month: '2025-02-01', month_index: 1, n_months: 6, volume_eur: 1000000, gross_margin_bps: -2, compression_slope_bps_per_year: -12, compression_pct_per_year: -342.8571}
+        - {segment: hedge_fund, currency_pair: EURGBP, month: '2025-03-01', month_index: 2, n_months: 6, volume_eur: 1000000, gross_margin_bps: -3, compression_slope_bps_per_year: -12, compression_pct_per_year: -342.8571}
+        - {segment: hedge_fund, currency_pair: EURGBP, month: '2025-04-01', month_index: 3, n_months: 6, volume_eur: 1000000, gross_margin_bps: -4, compression_slope_bps_per_year: -12, compression_pct_per_year: -342.8571}
+        - {segment: hedge_fund, currency_pair: EURGBP, month: '2025-05-01', month_index: 4, n_months: 6, volume_eur: 1000000, gross_margin_bps: -5, compression_slope_bps_per_year: -12, compression_pct_per_year: -342.8571}
+        - {segment: hedge_fund, currency_pair: EURGBP, month: '2025-06-01', month_index: 5, n_months: 6, volume_eur: 1000000, gross_margin_bps: -6, compression_slope_bps_per_year: -12, compression_pct_per_year: -342.8571}
 
   # Metric 8 on a book of seven clients (metrics.md section 6.5).
   #  volume: the six clients that traded (G did not), 400 / 200 / 150 / 100 / 100 / 50 of 1,000.
