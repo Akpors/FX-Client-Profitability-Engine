@@ -1,8 +1,7 @@
 """Command-line entry point for the fxengine pipeline.
 
-``fetch-ecb``, ``run-all`` and ``param-sheet`` are real. ``generate`` and ``load`` are stubs that
-return 0 until the task that implements them wires them up (``run-all`` does what ``generate``
-and ``load`` would, in one go).
+``fetch-ecb`` refreshes the ECB snapshot, ``run-all`` generates the book and loads it into the
+``raw`` schema in one go, and ``param-sheet`` renders the calibration parameter sheet.
 """
 
 from __future__ import annotations
@@ -21,14 +20,6 @@ import yaml
 from fxengine import ecb, param_sheet
 from fxengine.config import DEFAULT_CONFIG_PATH, load_config
 from fxengine.load import LoadError, assemble_raw_tables, engine_from_env, write_raw
-
-
-def _stub(name: str):
-    def handler(args: argparse.Namespace) -> int:
-        print(f"fxengine {name}: not implemented yet")
-        return 0
-
-    return handler
 
 
 def _iso_date(value: str) -> date:
@@ -81,8 +72,9 @@ def _run_all(args: argparse.Namespace) -> int:
             counts = write_raw(engine_from_env(), tables)
             loaded = time.perf_counter() - generated
             print(f"fxengine run-all: loaded into Postgres in {loaded:.1f}s")
-    except (OSError, ValueError, ecb.EcbError, LoadError) as exc:
-        # ValueError covers a bad config (pydantic's ValidationError) and a bad snapshot name.
+    except (OSError, ValueError, yaml.YAMLError, ecb.EcbError, LoadError) as exc:
+        # ValueError covers an invalid config (pydantic's ValidationError) and a bad snapshot
+        # name; yaml.YAMLError a config file that is not valid YAML at all.
         print(f"fxengine run-all: error: {' '.join(str(exc).split())}", file=sys.stderr)
         return 1
     except (psycopg.Error, sqlalchemy.exc.SQLAlchemyError) as exc:
@@ -127,12 +119,6 @@ def build_parser() -> argparse.ArgumentParser:
         description="Synthetic spot-FX trade book pipeline: ECB rates -> generate -> load.",
     )
     sub = parser.add_subparsers(dest="command", required=True, metavar="command")
-
-    for name, help_text in (
-        ("generate", "Generate the synthetic client book and trade book"),
-        ("load", "Load generated tables into the Postgres raw schema"),
-    ):
-        sub.add_parser(name, help=help_text).set_defaults(handler=_stub(name))
 
     fetch = sub.add_parser(
         "fetch-ecb", help="Download ECB reference rates and write the CSV snapshot"

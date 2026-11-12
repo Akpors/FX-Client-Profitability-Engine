@@ -1,8 +1,8 @@
 """Integration tests for the raw-schema load. They need the Postgres ``db`` service.
 
-Run with ``make test-integration``. ``write_raw`` always writes the real ``raw`` schema, so these
-tests replace whatever ``make pipeline`` loaded there and drop the raw tables again afterwards;
-run ``make pipeline`` to put the full book back.
+Run with ``make test-integration``. Every test writes to a dedicated ``raw_test`` schema, never to
+``raw``: setup and teardown drop ``raw_test`` only, so the book ``make pipeline`` loaded into
+``raw`` and the dbt views built on it are left exactly as they were.
 """
 
 from __future__ import annotations
@@ -18,7 +18,8 @@ from fxengine.load import RAW_SCHEMA, RAW_TABLES, engine_from_env, write_raw
 
 pytestmark = pytest.mark.integration
 
-TEST_VIEW = "raw.tmp_view_on_trades"
+SCHEMA = "raw_test"
+TEST_VIEW = f"{SCHEMA}.tmp_view_on_trades"
 
 
 @pytest.fixture(scope="module")
@@ -28,14 +29,37 @@ def engine():
     engine.dispose()
 
 
-@pytest.fixture(autouse=True)
-def clean_raw(engine):
-    """Leave no raw tables or test views behind, whatever the test did."""
-    yield
+def _drop_test_schema(engine) -> None:
     with engine.begin() as conn:
-        conn.execute(sa.text(f"DROP VIEW IF EXISTS {TEST_VIEW}"))
-        for name in RAW_TABLES:
-            conn.execute(sa.text(f"DROP TABLE IF EXISTS {RAW_SCHEMA}.{name} CASCADE"))
+        conn.execute(sa.text(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE"))
+
+
+@pytest.fixture(autouse=True)
+def clean_test_schema(engine):
+    """Start and finish every test with no ``raw_test`` schema; ``raw`` is never touched."""
+    _drop_test_schema(engine)
+    yield
+    _drop_test_schema(engine)
+
+
+def _relations(engine, schema: str) -> dict[str, int | None]:
+    """Every table and view in ``schema``, with the row count of each table (views: None)."""
+    with engine.connect() as conn:
+        rows = conn.execute(
+            sa.text(
+                "SELECT table_name, table_type FROM information_schema.tables "
+                "WHERE table_schema = :schema ORDER BY table_name"
+            ),
+            {"schema": schema},
+        ).all()
+        return {
+            name: (
+                conn.execute(sa.text(f'SELECT count(*) FROM "{schema}"."{name}"')).scalar_one()
+                if kind == "BASE TABLE"
+                else None
+            )
+            for name, kind in rows
+        }
 
 
 def _scalar(engine, sql: str):
@@ -44,13 +68,13 @@ def _scalar(engine, sql: str):
 
 
 def test_write_raw_creates_tables_with_counts(engine, small_raw_tables):
-    counts = write_raw(engine, small_raw_tables)
+    counts = write_raw(engine, small_raw_tables, schema=SCHEMA)
 
     assert set(counts) == set(RAW_TABLES) == set(small_raw_tables)
     assert counts == {name: len(frame) for name, frame in small_raw_tables.items()}
     assert counts["trades"] > 500
     for name, expected in counts.items():
-        assert _scalar(engine, f"SELECT count(*) FROM raw.{name}") == expected
+        assert _scalar(engine, f"SELECT count(*) FROM {SCHEMA}.{name}") == expected
 
     with engine.connect() as conn:
         types = {
@@ -58,8 +82,9 @@ def test_write_raw_creates_tables_with_counts(engine, small_raw_tables):
             for r in conn.execute(
                 sa.text(
                     "SELECT table_name, column_name, data_type, numeric_precision, numeric_scale "
-                    "FROM information_schema.columns WHERE table_schema = 'raw'"
-                )
+                    "FROM information_schema.columns WHERE table_schema = :schema"
+                ),
+                {"schema": SCHEMA},
             )
         }
 
@@ -80,16 +105,16 @@ def test_write_raw_creates_tables_with_counts(engine, small_raw_tables):
     assert types["ecb_rates", "currency"][0] == "text"
 
     # NaN is NULL: the top ticket band has no upper limit.
-    open_band = "SELECT count(*) FROM raw.ticket_bands WHERE max_ticket_eur IS NULL"
+    open_band = f"SELECT count(*) FROM {SCHEMA}.ticket_bands WHERE max_ticket_eur IS NULL"
     assert _scalar(engine, open_band) == 1
 
 
 def test_load_is_idempotent(engine, small_raw_tables):
     expected = len(small_raw_tables["trades"])
     for _ in range(2):
-        write_raw(engine, small_raw_tables)
-        assert _scalar(engine, "SELECT count(*) FROM raw.trades") == expected
-        assert _scalar(engine, "SELECT count(*) FROM raw.clients") == len(
+        write_raw(engine, small_raw_tables, schema=SCHEMA)
+        assert _scalar(engine, f"SELECT count(*) FROM {SCHEMA}.trades") == expected
+        assert _scalar(engine, f"SELECT count(*) FROM {SCHEMA}.clients") == len(
             small_raw_tables["clients"]
         )
 
@@ -108,13 +133,13 @@ def test_numeric_precision_preserved(engine, small_raw_tables):
         trades[column] = values
     trades["notional_base"] = [1_250_000, 80_000]
 
-    write_raw(engine, {"trades": trades})
+    write_raw(engine, {"trades": trades}, schema=SCHEMA)
 
     with engine.connect() as conn:
         rows = conn.execute(
             sa.text(
                 "SELECT client_rate, cover_rate, mid_rate, benchmark_rate, notional_base "
-                "FROM raw.trades ORDER BY trade_id"
+                f"FROM {SCHEMA}.trades ORDER BY trade_id"
             )
         ).all()
     assert all(isinstance(value, Decimal) for row in rows for value in row)
@@ -128,11 +153,11 @@ def test_numeric_precision_preserved(engine, small_raw_tables):
 
 
 def test_trade_timestamps_round_trip_in_utc(engine, small_raw_tables):
-    write_raw(engine, small_raw_tables)
+    write_raw(engine, small_raw_tables, schema=SCHEMA)
     trades = small_raw_tables["trades"]
     with engine.connect() as conn:
         stored = pd.read_sql(
-            sa.text("SELECT trade_id, trade_ts FROM raw.trades ORDER BY trade_id"), conn
+            sa.text(f"SELECT trade_id, trade_ts FROM {SCHEMA}.trades ORDER BY trade_id"), conn
         )
     assert (stored["trade_id"].to_numpy() == trades["trade_id"].to_numpy()).all()
     assert (
@@ -142,27 +167,45 @@ def test_trade_timestamps_round_trip_in_utc(engine, small_raw_tables):
 
 
 def test_failed_load_rolls_back_and_keeps_previous_tables(engine, small_raw_tables):
-    write_raw(engine, small_raw_tables)
-    before = _scalar(engine, "SELECT count(*) FROM raw.trades")
+    write_raw(engine, small_raw_tables, schema=SCHEMA)
+    before = _scalar(engine, f"SELECT count(*) FROM {SCHEMA}.trades")
 
     # The first four tables load; the poisoned trades frame fails part-way through COPY because
     # one rate overflows numeric(18,8). Nothing of the failed load may remain.
     poisoned = small_raw_tables["trades"].head(10).copy()
     poisoned.loc[poisoned.index[-1], "client_rate"] = 1e15
     with pytest.raises(psycopg.Error):
-        write_raw(engine, {"clients": small_raw_tables["clients"].head(3), "trades": poisoned})
+        write_raw(
+            engine,
+            {"clients": small_raw_tables["clients"].head(3), "trades": poisoned},
+            schema=SCHEMA,
+        )
 
-    assert _scalar(engine, "SELECT count(*) FROM raw.trades") == before
-    assert _scalar(engine, "SELECT count(*) FROM raw.clients") == len(small_raw_tables["clients"])
+    assert _scalar(engine, f"SELECT count(*) FROM {SCHEMA}.trades") == before
+    clients = _scalar(engine, f"SELECT count(*) FROM {SCHEMA}.clients")
+    assert clients == len(small_raw_tables["clients"])
 
 
 def test_reload_replaces_tables_that_views_depend_on(engine, small_raw_tables):
     """dbt staging views select from raw.*, so a re-run must still be able to replace them."""
-    write_raw(engine, small_raw_tables)
+    write_raw(engine, small_raw_tables, schema=SCHEMA)
     with engine.begin() as conn:
-        conn.execute(sa.text(f"CREATE VIEW {TEST_VIEW} AS SELECT * FROM raw.trades"))
+        conn.execute(sa.text(f"CREATE VIEW {TEST_VIEW} AS SELECT * FROM {SCHEMA}.trades"))
 
-    counts = write_raw(engine, small_raw_tables)
+    counts = write_raw(engine, small_raw_tables, schema=SCHEMA)
 
     assert counts["trades"] == len(small_raw_tables["trades"])
-    assert _scalar(engine, "SELECT to_regclass('raw.tmp_view_on_trades') IS NULL")
+    assert _scalar(engine, f"SELECT to_regclass('{TEST_VIEW}') IS NULL")
+
+
+def test_writing_the_test_schema_leaves_raw_and_its_views_alone(engine, small_raw_tables):
+    """The raw book from ``make pipeline`` and dbt's staging views on it survive the tests."""
+    raw_before = _relations(engine, RAW_SCHEMA)
+    staging_before = _relations(engine, "staging")
+
+    write_raw(engine, small_raw_tables, schema=SCHEMA)
+    write_raw(engine, small_raw_tables, schema=SCHEMA)  # a reload cascades inside raw_test only
+    _drop_test_schema(engine)
+
+    assert _relations(engine, RAW_SCHEMA) == raw_before
+    assert _relations(engine, "staging") == staging_before

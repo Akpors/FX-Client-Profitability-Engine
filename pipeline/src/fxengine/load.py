@@ -223,7 +223,7 @@ def _python_values(series: pd.Series) -> list:
 # --- writing ----------------------------------------------------------------------------------
 
 
-def _create_table(name: str) -> sql.Composed:
+def _create_table(schema: str, name: str) -> sql.Composed:
     columns = [
         sql.SQL("{} {}{}").format(
             sql.Identifier(column),
@@ -233,17 +233,22 @@ def _create_table(name: str) -> sql.Composed:
         for column, sql_type in RAW_COLUMNS[name].items()
     ]
     return sql.SQL("CREATE TABLE {} ({})").format(
-        sql.Identifier(RAW_SCHEMA, name), sql.SQL(", ").join(columns)
+        sql.Identifier(schema, name), sql.SQL(", ").join(columns)
     )
 
 
-def write_raw(engine: sa.Engine, tables: Mapping[str, pd.DataFrame]) -> dict[str, int]:
-    """Replace the given ``raw`` tables with ``tables`` and return the rows loaded per table.
+def write_raw(
+    engine: sa.Engine, tables: Mapping[str, pd.DataFrame], schema: str = RAW_SCHEMA
+) -> dict[str, int]:
+    """Replace the given raw tables in ``schema`` with ``tables``; return the rows loaded per table.
 
-    Everything runs in one transaction: ``CREATE SCHEMA IF NOT EXISTS raw``, then for each table
-    ``DROP TABLE IF EXISTS``, ``CREATE TABLE`` with the declared types and a ``COPY`` of the rows.
-    On any error the transaction rolls back and the previous tables are untouched. The frames are
-    checked against the declared schema before the database is contacted.
+    ``schema`` is ``raw`` in the pipeline. The integration tests pass a schema of their own, so
+    they never touch the book ``make pipeline`` loaded or the dbt views built on it.
+
+    Everything runs in one transaction: ``CREATE SCHEMA IF NOT EXISTS <schema>``, then for each
+    table ``DROP TABLE IF EXISTS``, ``CREATE TABLE`` with the declared types and a ``COPY`` of the
+    rows. On any error the transaction rolls back and the previous tables are untouched. The
+    frames are checked against the declared schema before the database is contacted.
 
     The drop cascades to views that select from the table (dbt staging models, when they are
     views), which a re-run of ``make pipeline`` rebuilds with ``dbt build``. Without the cascade
@@ -263,18 +268,18 @@ def write_raw(engine: sa.Engine, tables: Mapping[str, pd.DataFrame]) -> dict[str
     try:
         with connection.cursor() as cursor:
             cursor.execute(
-                sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(RAW_SCHEMA))
+                sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema))
             )
             for name, frame in tables.items():
                 cursor.execute(
                     sql.SQL("DROP TABLE IF EXISTS {} CASCADE").format(
-                        sql.Identifier(RAW_SCHEMA, name)
+                        sql.Identifier(schema, name)
                     )
                 )
-                cursor.execute(_create_table(name))
+                cursor.execute(_create_table(schema, name))
                 columns = list(RAW_COLUMNS[name])
                 copy_sql = sql.SQL("COPY {} ({}) FROM STDIN").format(
-                    sql.Identifier(RAW_SCHEMA, name),
+                    sql.Identifier(schema, name),
                     sql.SQL(", ").join(sql.Identifier(column) for column in columns),
                 )
                 with cursor.copy(copy_sql) as copy:
@@ -282,7 +287,7 @@ def write_raw(engine: sa.Engine, tables: Mapping[str, pd.DataFrame]) -> dict[str
                         copy.write_row(row)
                 if cursor.rowcount != len(frame):
                     raise LoadError(
-                        f"raw.{name}: {len(frame)} rows sent, {cursor.rowcount} loaded"
+                        f"{schema}.{name}: {len(frame)} rows sent, {cursor.rowcount} loaded"
                     )
                 counts[name] = cursor.rowcount
         connection.commit()

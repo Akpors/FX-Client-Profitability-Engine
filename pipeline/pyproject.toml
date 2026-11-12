@@ -1,5 +1,6 @@
 [build-system]
-requires = ["setuptools>=68"]
+# Exact pin, like requirements.lock: 84.2.1 is the setuptools that built the installed package.
+requires = ["setuptools==84.2.1"]
 build-backend = "setuptools.build_meta"
 
 [project]

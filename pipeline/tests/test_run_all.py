@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
 import pandas as pd
@@ -10,7 +11,14 @@ import yaml
 
 from fxengine import cli
 from fxengine.config import GeneratorConfig
-from fxengine.load import RAW_COLUMNS, RAW_TABLES, LoadError, assemble_raw_tables, write_raw
+from fxengine.load import (
+    RAW_COLUMNS,
+    RAW_SCHEMA,
+    RAW_TABLES,
+    LoadError,
+    assemble_raw_tables,
+    write_raw,
+)
 
 
 class NoDatabase:
@@ -50,6 +58,11 @@ def test_assemble_is_reproducible(small_cfg, ecb, small_window, small_raw_tables
 
 
 # --- schema checks ----------------------------------------------------------------------------
+
+
+def test_write_raw_writes_the_raw_schema_unless_told_otherwise():
+    assert RAW_SCHEMA == "raw"
+    assert inspect.signature(write_raw).parameters["schema"].default == RAW_SCHEMA
 
 
 def test_write_raw_rejects_extra_columns(small_raw_tables):
@@ -143,3 +156,32 @@ def test_run_all_rejects_a_snapshot_with_no_window_in_its_name(tmp_path, small_c
 def test_run_all_reports_a_missing_config(tmp_path, snapshot_path, capsys):
     assert run_all(tmp_path / "nope.yaml", snapshot_path, "--dry-run") == 1
     assert "nope.yaml" in capsys.readouterr().err
+
+
+def test_run_all_reports_malformed_yaml_in_one_line(tmp_path, snapshot_path, capsys):
+    broken = tmp_path / "broken.yaml"
+    broken.write_text("seed: 42\nsegments: [unclosed\n")
+
+    assert run_all(broken, snapshot_path, "--dry-run") == 1
+    err = capsys.readouterr().err
+    assert err.startswith("fxengine run-all: error:")
+    assert err.count("\n") == 1, err  # one line, no traceback
+
+
+def test_run_all_reports_an_invalid_config_in_one_line(tmp_path, snapshot_path, capsys):
+    invalid = tmp_path / "invalid.yaml"
+    invalid.write_text("seed: 42\nn_clients: -5\n")
+
+    assert run_all(invalid, snapshot_path, "--dry-run") == 1
+    err = capsys.readouterr().err
+    assert err.startswith("fxengine run-all: error:")
+    assert err.count("\n") == 1, err
+
+
+@pytest.mark.parametrize("command", ["generate", "load"])
+def test_retired_stub_commands_are_gone(command, capsys):
+    # run-all generates and loads in one go; the old placeholders must not pretend to work.
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main([command])
+    assert excinfo.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err

@@ -10,3 +10,4 @@ dbt/logs/
 dbt/dbt_packages/
 .ipynb_checkpoints/
 dbt/.user.yml
+.DS_Store
