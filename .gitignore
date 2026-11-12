@@ -1,3 +1,11 @@
 .claude/settings.local.json
 .superpowers/
 .env
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+dbt/target/
+dbt/logs/
+dbt/dbt_packages/
+.ipynb_checkpoints/
