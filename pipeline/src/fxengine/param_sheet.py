@@ -4,14 +4,19 @@
 Markdown document: every calibration parameter with its default, a blank "Your value" slot and a
 one-line reason. ``make param-sheet`` writes it to ``docs/methodology/parameter-sheet.md``.
 
+The sheet must fit one printed A4 portrait page (spec section 11.1), so the layout is dense:
+the segment parameters, the ticket bands and the volume tiers are grids of default and blank
+"Your value" rows, and each grid row has one reason in a bullet underneath. The limits are
+pinned by ``test_sheet_fits_one_page_70_lines_8_columns_110_chars``.
+
 The sheet is a pure function of the config and the rationale. There is no timestamp and no
 random or ordering-dependent content, so the same inputs always give byte-identical output and a
 test can tell when the committed copy has gone stale.
 
 The rationale is a flat mapping of dotted key to text, documented at the top of
 ``pipeline/config/rationale.yaml``. Sections are built in the order they appear on the page and
-each Why is looked up as its row is built, so the ``KeyError`` for a missing key names the first
-one a reader would hit, and a missing key never yields a half-written sheet.
+each Why is looked up as its row is built, so ``MissingRationaleError`` (a ``KeyError``) names
+the first missing key a reader would hit, and a missing key never yields a half-written sheet.
 """
 
 from __future__ import annotations
@@ -21,7 +26,13 @@ from pathlib import Path
 
 import yaml
 
-from fxengine.config import LIQUIDITY_TIERS, SEGMENT_NAMES, GeneratorConfig, SegmentConfig
+from fxengine.config import (
+    LIQUIDITY_TIERS,
+    SEGMENT_NAMES,
+    GeneratorConfig,
+    PairConfig,
+    SegmentConfig,
+)
 
 # <repo>/pipeline/config/rationale.yaml; /app/config/rationale.yaml inside the container.
 DEFAULT_RATIONALE_PATH = Path(__file__).resolve().parents[2] / "config" / "rationale.yaml"
@@ -42,6 +53,17 @@ SEGMENT_LABELS = {
 TIER_LABELS = {"g10_major": "major", "g10_minor": "minor", "cee": "CEE", "em": "EM"}
 
 Why = Callable[[str], str]
+
+
+class MissingRationaleError(KeyError):
+    """A parameter on the sheet has no rationale line; ``key`` is the rationale key it needs."""
+
+    def __init__(self, key: str) -> None:
+        super().__init__(f"rationale is missing a line for {key!r}")
+        self.key = key
+
+    def __str__(self) -> str:
+        return str(self.args[0])
 
 
 def load_rationale(path: Path) -> dict[str, str]:
@@ -65,25 +87,23 @@ def load_rationale(path: Path) -> dict[str, str]:
 def render_parameter_sheet(cfg: GeneratorConfig, rationale: Mapping[str, str]) -> str:
     """The parameter sheet as Markdown, ending in a single newline.
 
-    Raises ``KeyError`` naming the first parameter, in page order, that has no (or a blank)
-    rationale.
+    Raises ``MissingRationaleError`` naming the first parameter, in page order, that has no (or
+    a blank) rationale.
     """
 
     def why(key: str) -> str:
         text = rationale.get(key)
         if text is None or not text.strip():
-            raise KeyError(f"rationale is missing a line for {key!r}")
+            raise MissingRationaleError(key)
         # One line, and a pipe must not split the table cell.
         return " ".join(text.split()).replace("|", r"\|")
 
     lines: list[str] = []
     for section in (
-        _header(cfg),
+        _header(),
         _segment_parameters(cfg, why),
-        _ticket_bands(cfg, why),
-        _volume_tiers(cfg, why),
+        _bands_and_tiers(cfg, why),
         _cost_and_hurdle(cfg, why),
-        _pairs(cfg, why),
         _footer(),
     ):
         lines.extend(section)
@@ -104,11 +124,12 @@ def _pct(fraction: float, min_decimals: int = 0) -> str:
     return _num(round(fraction * 100, 4), min_decimals) + "%"
 
 
-def _eur(amount: float) -> str:
+def _size(amount: float) -> str:
+    """A EUR amount in the shorthand a desk uses: 25k, 100m, 2bn."""
     for size, suffix in ((1e9, "bn"), (1e6, "m"), (1e3, "k")):
         if amount >= size:
-            return f"EUR {_num(amount / size)}{suffix}"
-    return f"EUR {_num(amount)}"
+            return f"{_num(amount / size)}{suffix}"
+    return _num(amount)
 
 
 def _segment_label(name: str) -> str:
@@ -119,196 +140,171 @@ def _table(headers: Sequence[str], rows: Iterable[Sequence[str]]) -> list[str]:
     def line(cells: Sequence[str]) -> str:
         return "| " + " | ".join(cells) + " |"
 
-    return [line(headers), line(["---"] * len(headers)), *(line(row) for row in rows), ""]
+    return [line(headers), line(["---"] * len(headers)), *(line(row) for row in rows)]
+
+
+def _grid(
+    name: str, columns: Sequence[str], rows: Sequence[tuple[str, Sequence[str]]]
+) -> list[str]:
+    """Each parameter as a Default row and a blank Your value row, one column per entry."""
+    body: list[Sequence[str]] = []
+    for label, values in rows:
+        body.append([label, "Default", *values])
+        body.append(["", "Your value", *([""] * len(values))])
+    return _table([name, "Value", *columns], body)
+
+
+def _reasons(why: Why, bullets: Sequence[tuple[str, str]]) -> list[str]:
+    return [f"- **{label}:** {why(key)}" for label, key in bullets]
+
+
+def _pairs_where(cfg: GeneratorConfig, keep: Callable[[PairConfig], bool]) -> str:
+    codes = [code.removeprefix("EUR") for code, pair in cfg.pairs.items() if keep(pair)]
+    return " ".join(codes) or "none"
 
 
 # --- sections ---------------------------------------------------------------------------------
+# Sections return lines with no trailing blank; ``render_parameter_sheet`` joins them as they are.
+# An ATX heading needs no blank line before it, which is how the sheet saves lines.
 
 
-def _header(cfg: GeneratorConfig) -> list[str]:
+def _header() -> list[str]:
     return [
         "# Calibration parameter sheet",
+        "> **Illustrative defaults, pending owner calibration** (spec section 11.1), not market "
+        "data or any firm's.",
+        "> Fill the Your value cells on a copy; the builder applies them to `generator.yaml` "
+        "until you approve.",
         "",
-        "> **Illustrative defaults, pending owner calibration** (spec section 11.1): the "
-        "builder's plausible starting values for a European spot-FX dealer, not market data and "
-        "not from any real firm or client. Write your value in the blank column on a copy or "
-        "printout. The builder applies it to `pipeline/config/generator.yaml` and regenerates "
-        "this sheet until you approve, then the parameters are frozen.",
-        "",
-        f"Book: {cfg.n_clients} clients, about {cfg.target_trades:,} trades over 24 months, "
-        f"seed {cfg.seed}. Money in EUR.",
-        "",
-    ]
-
-
-def _ticket_bands(cfg: GeneratorConfig, why: Why) -> list[str]:
-    rows = [
-        [band.label, _num(band.markup_multiplier, 2), "", why(f"ticket_band.{band.label}")]
-        for band in cfg.ticket_bands
-    ]
-    return [
-        "## 2. Ticket-size bands",
-        "",
-        "A multiplier on the base markup. A band includes its lower edge and excludes its "
-        "upper edge; the edges are set in `generator.yaml`.",
-        "",
-        *_table(["Ticket band", "Default multiplier", "Your value", "Why"], rows),
-    ]
-
-
-def _volume_tiers(cfg: GeneratorConfig, why: Why) -> list[str]:
-    rows = [
-        [
-            f"Tier {i}",
-            _eur(tier.min_annual_volume_eur),
-            _pct(tier.discount_pct),
-            "",
-            why(f"volume_tier.{i}"),
-        ]
-        for i, tier in enumerate(cfg.volume_tiers, start=1)
-    ]
-    return [
-        "## 3. Volume-discount tiers",
-        "",
-        "A client gets the discount of the highest tier its expected annual volume reaches: a "
-        "share taken off the markup, stacking with a legacy deal.",
-        "",
-        *_table(
-            ["Volume tier", "Annual volume from", "Default discount", "Your value", "Why"], rows
-        ),
     ]
 
 
 def _segment_parameters(cfg: GeneratorConfig, why: Why) -> list[str]:
-    """One grid of defaults and one blank grid, parameters down the side, segments across."""
+    """Parameters down the side, the six segments across; a Default and a blank row each."""
 
     def adverse(segment: SegmentConfig) -> str:
         mean, sd = segment.adverse_selection_bps
-        return f"{_num(mean, 2)} / {_num(sd, 2)}"
+        return f"{_num(mean, 2)}/{_num(sd, 2)}"
 
-    # (row label, rationale key, value of that row for one segment)
-    parameters: list[tuple[str, str, Callable[[SegmentConfig], str]]] = [
-        (
-            f"Markup, {TIER_LABELS[tier]} (bps)",
-            f"markup.{tier}",
-            lambda s, tier=tier: _num(s.base_markup_bps[tier], 1),
+    rows: list[tuple[str, Callable[[SegmentConfig], str]]] = []
+    for tier in LIQUIDITY_TIERS:
+        pairs = _pairs_where(cfg, lambda pair, tier=tier: pair.liquidity_tier == tier)
+        rows.append(
+            (
+                f"Markup, {TIER_LABELS[tier]}: {pairs} (bps)",
+                lambda s, tier=tier: _num(s.base_markup_bps[tier], 1),
+            )
         )
-        for tier in LIQUIDITY_TIERS
-    ] + [
-        ("Compression per year", "compression", lambda s: _num(s.compression_per_year, 2)),
-        ("Adverse selection mean / sd (bps)", "adverse_selection", adverse),
-        ("Ops cost per ticket (EUR)", "ops_cost", lambda s: _num(s.ops_cost_per_ticket_eur, 1)),
+    rows += [
+        ("Compression per year", lambda s: _num(s.compression_per_year, 2)),
+        ("Adverse selection mean/sd (bps)", adverse),
+        ("Ops cost per ticket (EUR)", lambda s: _num(s.ops_cost_per_ticket_eur, 1)),
         (
-            "Coverage cost per month (EUR)",
-            "coverage",
+            "Coverage cost per client per month (EUR)",
             lambda s: _num(s.coverage_cost_eur_per_month),
         ),
-        ("Credit weight", "credit_weight", lambda s: _num(s.credit_weight, 2)),
-        ("Negotiation sigma", "client_markup_sigma", lambda s: _num(s.client_markup_sigma, 2)),
+        ("Credit weight", lambda s: _num(s.credit_weight, 2)),
+        ("Negotiation sigma (client price scatter)", lambda s: _num(s.client_markup_sigma, 2)),
     ]
     segments = [cfg.segments[name] for name in SEGMENT_NAMES]
-    labels = [_segment_label(name) for name in SEGMENT_NAMES]
-
-    defaults = [[label, *(show(segment) for segment in segments)] for label, _, show in parameters]
-    blanks = [[label, *([""] * len(segments))] for label, _, _ in parameters]
-    # The reasons sit under the grids, one per row in row order. The segment ladder explains the
-    # markup rows across segments, so it follows the last of them.
-    reasons: list[str] = []
-    for i, (label, key, _) in enumerate(parameters):
-        reasons.append(f"- **{label}:** {why(key)}")
-        if i == len(LIQUIDITY_TIERS) - 1:
-            reasons.append(f"- **Markup by segment:** {why('markup.segment_ladder')}")
-
-    tier_pairs = {
-        tier: ", ".join(
-            code.removeprefix("EUR")
-            for code, pair in cfg.pairs.items()
-            if pair.liquidity_tier == tier
-        )
-        for tier in LIQUIDITY_TIERS
-    }
-    tiers = "; ".join(f"{TIER_LABELS[tier]} = {tier_pairs[tier]}" for tier in LIQUIDITY_TIERS)
+    grid = _grid(
+        "Segment parameter",
+        [_segment_label(name) for name in SEGMENT_NAMES],
+        [(label, [show(segment) for segment in segments]) for label, show in rows],
+    )
+    bullets = [
+        ("Markup", "markup"),
+        ("Compression", "compression"),
+        ("Adverse selection", "adverse_selection"),
+        ("Ops cost", "ops_cost"),
+        ("Coverage", "coverage"),
+        ("Credit weight", "credit_weight"),
+        ("Negotiation sigma", "client_markup_sigma"),
+    ]
     return [
         "## 1. Segment parameters",
+        "Markup is base bps from mid, before bands, tiers, legacy deals, compression and noise.",
+        "Compression: markup x e^(-rate x years). Adverse selection: cover vs mid, + hurts dealer.",
         "",
-        "Markup is one-sided, in bps from mid to the client's rate, before the ticket-band "
-        "multiplier (section 2), volume discount (section 3), legacy deal, compression and "
-        f"noise. Tiers (pairs against EUR): {tiers}.",
+        *grid,
         "",
-        "- **Compression:** markup x e^(-rate x years since the window opened); a rate r cuts "
-        "it by about 1 - e^-r a year.",
-        "- **Adverse selection:** mean / sd of the dealer's cover price against mid, in bps; "
-        "positive is worse for the dealer.",
-        "- **Negotiation sigma:** each client's price factor is LogNormal(0, sigma), median "
-        "1.0, fixed for the window.",
+        *_reasons(why, bullets),
+    ]
+
+
+def _bands_and_tiers(cfg: GeneratorConfig, why: Why) -> list[str]:
+    bands = cfg.ticket_bands
+    tiers = cfg.volume_tiers
+    band_grid = _grid(
+        "Ticket band",
+        [band.label for band in bands],
+        [
+            (
+                "Upper edge (EUR)",
+                [
+                    _size(b.max_ticket_eur) if b.max_ticket_eur is not None else "none"
+                    for b in bands
+                ],
+            ),
+            ("Markup multiplier", [_num(b.markup_multiplier, 2) for b in bands]),
+        ],
+    )
+    tier_grid = _grid(
+        "Volume tier",
+        [f"Tier {i}" for i in range(1, len(tiers) + 1)],
+        [
+            ("Annual volume from (EUR)", [_size(t.min_annual_volume_eur) for t in tiers]),
+            ("Discount off markup", [_pct(t.discount_pct) for t in tiers]),
+        ],
+    )
+    bullets = [
+        ("Band edges", "ticket_band.edges"),
+        ("Band multipliers", "ticket_band.multiplier"),
+        ("Tier thresholds", "volume_tier.threshold"),
+        ("Tier discounts", "volume_tier.discount"),
+    ]
+    return [
+        "## 2. Ticket bands and volume tiers",
+        *band_grid,
         "",
-        *_table(["Default", *labels], defaults),
-        *_table(["Your value", *labels], blanks),
-        *reasons,
+        *tier_grid,
         "",
+        *_reasons(why, bullets),
     ]
 
 
 def _cost_and_hurdle(cfg: GeneratorConfig, why: Why) -> list[str]:
     cost, legacy = cfg.cost, cfg.legacy_deal
-    non_cls = ", ".join(code for code, pair in cfg.pairs.items() if not pair.cls_settled)
+    non_cls = _pairs_where(cfg, lambda pair: not pair.cls_settled)
     rows = [
-        [
-            "Capital charge (bps of notional)",
-            _num(cost.capital_charge_bps, 2),
-            "",
-            why("capital_charge_bps"),
-        ],
-        [
-            "Settlement weight, CLS-settled pairs",
+        ("Capital charge (bps)", _num(cost.capital_charge_bps, 2), "capital_charge_bps"),
+        (
+            "Settlement weight, CLS",
             _num(cost.settlement_weight_cls, 1),
-            "",
-            why("settlement_weight.cls"),
-        ],
-        [
-            "Settlement weight, non-CLS pairs",
+            "settlement_weight.cls",
+        ),
+        (
+            f"Settlement weight, non-CLS ({non_cls})",
             _num(cost.settlement_weight_non_cls, 1),
-            "",
-            why("settlement_weight.non_cls"),
-        ],
-        ["Hurdle rate (bps of volume)", _num(cost.hurdle_rate_bps, 2), "", why("hurdle_rate_bps")],
-        ["Legacy deal probability", _pct(legacy.probability), "", why("legacy_deal.probability")],
-        ["Legacy deal discount", _pct(legacy.discount_pct), "", why("legacy_deal.discount_pct")],
+            "settlement_weight.non_cls",
+        ),
+        ("Hurdle rate (bps of volume)", _num(cost.hurdle_rate_bps, 2), "hurdle_rate_bps"),
+        ("Legacy deal probability", _pct(legacy.probability), "legacy_deal.probability"),
+        ("Legacy deal discount", _pct(legacy.discount_pct), "legacy_deal.discount_pct"),
     ]
     return [
-        "## 4. Capital, hurdle and legacy deals",
-        "",
-        "Capital charge per trade = notional x capital charge bps / 10,000 x credit weight x "
-        f"settlement weight. Non-CLS pairs: {non_cls or 'none'}. The hurdle is the minimum "
-        "economic margin (bps of volume) for a client to earn its place. A legacy deal is an old "
-        "discount never repriced; only a client onboarded before the window can hold one.",
-        "",
-        *_table(["Parameter", "Default", "Your value", "Why"], rows),
-    ]
-
-
-def _pairs(cfg: GeneratorConfig, why: Why) -> list[str]:
-    codes = [code.removeprefix("EUR") for code in cfg.pairs]
-    rows = [
-        ["Liquidity tier", *(TIER_LABELS[pair.liquidity_tier] for pair in cfg.pairs.values())],
-        ["Annual vol, default", *(_pct(pair.annual_vol, 1) for pair in cfg.pairs.values())],
-        ["Annual vol, your value", *([""] * len(codes))],
-    ]
-    return [
-        "## 5. Pair volatility",
-        "",
-        *_table(["Pair", *codes], rows),
-        f"- **Annual vol:** {why('pair_annual_vol')}",
+        "## 3. Capital, hurdle and legacy deals",
+        *_table(
+            ["Parameter", "Default", "Your value", "Why"],
+            [[label, default, "", why(key)] for label, default, key in rows],
+        ),
         "",
     ]
 
 
 def _footer() -> list[str]:
     return [
-        "---",
-        "",
-        "Regenerate with `make param-sheet`; do not edit by hand. Source: "
-        "`pipeline/config/generator.yaml` and `pipeline/config/rationale.yaml`. Client mix, trade "
-        "frequency, ticket-size distribution, pair mix and noise are not calibrated here; they "
-        "stay in `generator.yaml` and are described in `docs/methodology/data-generation.md`.",
+        "Regenerate with `make param-sheet`; do not edit by hand. Source: `generator.yaml` and "
+        "`rationale.yaml`.",
+        "Client mix, trade frequency, ticket sizes, pair mix and noise are not calibrated here.",
     ]

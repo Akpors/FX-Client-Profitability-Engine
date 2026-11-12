@@ -109,8 +109,9 @@ def _param_sheet(args: argparse.Namespace) -> int:
         sheet = param_sheet.render_parameter_sheet(cfg, rationale)
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(sheet, encoding="utf-8")
-    except KeyError as exc:
-        print(f"fxengine param-sheet: error: {exc.args[0]}", file=sys.stderr)
+    except param_sheet.MissingRationaleError as exc:
+        # Only this KeyError is a user error; any other one is a bug and keeps its traceback.
+        print(f"fxengine param-sheet: error: {exc}", file=sys.stderr)
         return 1
     except (OSError, ValueError, yaml.YAMLError) as exc:
         # ValueError covers a bad config (pydantic's ValidationError) and a bad rationale file.
