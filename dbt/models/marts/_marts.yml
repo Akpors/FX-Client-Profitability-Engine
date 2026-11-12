@@ -129,6 +129,136 @@ models:
       - name: contribution_ex_coverage_eur
         data_tests: [not_null]
 
+  - name: mart_concentration
+    description: >
+      Client concentration (metric 8): one row per measure. volume is over every client with
+      trades, revenue over clients with positive revenue, contribution_positive over clients
+      with positive economic contribution. Shares are within the measure's own population;
+      topN_share is the sum of the N largest shares; hhi is the sum of squared shares on a 0-1
+      scale (not the 0-10,000 scale of antitrust practice); n_clients is the population size.
+      A measure with an empty population has no row. See metrics.md section 6.
+    data_tests:
+      - unique:
+          column_name: measure
+    columns:
+      - name: measure
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['volume', 'revenue', 'contribution_positive']
+      - name: n_clients
+        description: Number of clients in the measure's population.
+        data_tests: [not_null]
+      - name: top5_share
+        description: Share of the measure held by the 5 largest clients (1 when the population has 5 or fewer).
+        data_tests: [not_null]
+      - name: top10_share
+        data_tests: [not_null]
+      - name: top20_share
+        data_tests: [not_null]
+      - name: hhi
+        description: Sum of squared shares, 0-1 scale. Bounds 1 / n_clients to 1 (assert_hhi_bounds).
+        data_tests: [not_null]
+
+  - name: mart_client_monthly
+    description: >
+      Client profitability trends (metric 12): int_client_month with the client's name, the
+      month index, margins in bps, a rolling 3-month contribution, the trend slope of monthly
+      contribution and a trend flag. One row per client per month on the book, zero-trade months
+      included. See metrics.md section 8.
+    data_tests:
+      - unique:
+          column_name: "client_id || '|' || month"
+    columns:
+      - name: client_id
+        data_tests: [not_null]
+      - name: client_name
+        data_tests: [not_null]
+      - name: segment
+        data_tests: [not_null]
+      - name: month
+        description: First day of the calendar month.
+        data_tests: [not_null]
+      - name: month_index
+        description: Whole months since the window start (0 for the first window month). A client onboarded mid-window starts at its onboarding month, not at 0.
+        data_tests: [not_null]
+      - name: gross_margin_bps
+        description: revenue_eur / volume_eur x 10,000; NULL for a month with no volume.
+      - name: economic_margin_bps
+        description: economic_contribution_eur / volume_eur x 10,000; NULL for a month with no volume.
+      - name: contribution_rolling_3m_eur
+        description: SUM (not a mean) of economic contribution over the current and the 2 prior months; NULL until the client has 3 months of history.
+      - name: trend_slope_eur_per_month
+        description: Least-squares slope of monthly contribution on month_index, per client, repeated on each of its rows. NULL for a client with a single month.
+      - name: trend_flag
+        description: stable when |slope| < 0.05 x the client's mean monthly |contribution| (or the slope is NULL); otherwise improving (slope > 0) or deteriorating (slope < 0).
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['improving', 'stable', 'deteriorating']
+
+  - name: mart_spread_compression
+    description: >
+      Spread compression (metric 11): realised gross margin in bps by month, segment and currency
+      pair, for months that have trades, with the trend slope per segment x pair in bps per year
+      (negative means the margin is compressing). Only combinations with trades in at least 6
+      distinct months are kept, so the slope is always defined. See metrics.md section 7.
+    data_tests:
+      - unique:
+          column_name: "month || '|' || segment || '|' || currency_pair"
+    columns:
+      - name: month
+        description: First day of the calendar month.
+        data_tests: [not_null]
+      - name: segment
+        data_tests: [not_null]
+      - name: currency_pair
+        data_tests: [not_null]
+      - name: month_index
+        description: Whole months since the window start.
+        data_tests: [not_null]
+      - name: n_months
+        description: Months with trades for this segment x pair; at least 6 by construction.
+        data_tests: [not_null]
+      - name: volume_eur
+        data_tests: [not_null]
+      - name: gross_margin_bps
+        description: Σ gross_pnl_eur / Σ notional_eur x 10,000 over the cell's trades (never an average of trade-level bps).
+        data_tests: [not_null]
+      - name: compression_slope_bps_per_year
+        description: Ordinary least-squares slope of gross_margin_bps on month_index, x 12, repeated on each row of the segment x pair.
+        data_tests: [not_null]
+
+  - name: mart_headline_kpis
+    description: >
+      The headline numbers of the book over the window, one row: total volume, revenue and
+      economic contribution, gross and economic margin in bps, the number of clients that traded,
+      the trade count, the window dates and the hurdle rate. See metrics.md section 9.
+    columns:
+      - name: total_volume_eur
+        data_tests: [not_null]
+      - name: total_revenue_eur
+        data_tests: [not_null]
+      - name: total_contribution_eur
+        description: Σ client economic contribution, so it includes coverage cost of clients with no trades.
+        data_tests: [not_null]
+      - name: gross_margin_bps
+        data_tests: [not_null]
+      - name: economic_margin_bps
+        data_tests: [not_null]
+      - name: client_count
+        description: Clients with at least one trade in the window.
+        data_tests: [not_null]
+      - name: trade_count
+        data_tests: [not_null]
+      - name: window_start
+        data_tests: [not_null]
+      - name: window_end
+        data_tests: [not_null]
+      - name: hurdle_rate_bps
+        description: Minimum acceptable economic margin in bps of volume, read from the parameters by name.
+        data_tests: [not_null]
+
 unit_tests:
   # The brief's layout puts the dealer's two legs side by side. Both trades are the EURUSD
   # examples of metrics.md section 1.7: the dealer earns 0.0010 USD per EUR either way, so
@@ -193,3 +323,188 @@ unit_tests:
         - {client_id: A, trade_count: 2, volume_eur: 250000, gross_margin_bps: 20, economic_contribution_eur: 378, economic_margin_bps: 15.12, contribution_per_trade_eur: 189, p10_contribution_per_trade_eur: 149, median_contribution_per_trade_eur: 189, p90_contribution_per_trade_eur: 229, avg_ticket_eur: 125000, median_ticket_eur: 125000, modal_ticket_band: 100k-500k, avg_benchmark_spread_bps: 2.4, avg_cover_slippage_bps: 0.2, volume_share: 0.7143, revenue_share: 0.8333, contribution_share: 1.0286, share_gap: -0.3143, peer_median_gross_margin_bps: 15, peer_group_size: 2}
         - {client_id: B, trade_count: 1, volume_eur: 100000, gross_margin_bps: 10, economic_contribution_eur: -10.5, economic_margin_bps: -1.05, contribution_per_trade_eur: -10.5, p10_contribution_per_trade_eur: -10.5, median_contribution_per_trade_eur: -10.5, p90_contribution_per_trade_eur: -10.5, avg_ticket_eur: 100000, median_ticket_eur: 100000, modal_ticket_band: 100k-500k, avg_benchmark_spread_bps: 1, avg_cover_slippage_bps: 0, volume_share: 0.2857, revenue_share: 0.1667, contribution_share: -0.0286, share_gap: 0.3143, peer_median_gross_margin_bps: 15, peer_group_size: 2}
         - {client_id: C, trade_count: 0, volume_eur: 0, gross_margin_bps: null, economic_contribution_eur: 0, economic_margin_bps: null, contribution_per_trade_eur: null, p10_contribution_per_trade_eur: null, median_contribution_per_trade_eur: null, p90_contribution_per_trade_eur: null, avg_ticket_eur: null, median_ticket_eur: null, modal_ticket_band: null, avg_benchmark_spread_bps: null, avg_cover_slippage_bps: null, volume_share: 0, revenue_share: 0, contribution_share: 0, share_gap: 0, peer_median_gross_margin_bps: null, peer_group_size: null}
+
+  # Metric 12, the brief's example. Contributions of 100, 200 and 300 over three consecutive
+  # months give a slope of exactly 100 EUR per month. The mean monthly |contribution| is 200, so
+  # the "stable" band is |slope| < 10, and 100 is far outside it: improving. Volume is EUR 1m a
+  # month, so the margins are easy to check: 150 / 1,000,000 x 10,000 = 1.5 bps gross and
+  # 100 / 1,000,000 x 10,000 = 1.0 bps economic. The rolling 3-month figure is a sum, and is NULL
+  # until the client has three months of history: 100 + 200 + 300 = 600 in March only.
+  - name: mart_client_monthly_improving_trend
+    model: mart_client_monthly
+    given:
+      - input: ref('int_window')
+        format: dict
+        rows:
+          - {window_start: '2025-01-01', window_end: '2025-03-31'}
+      - input: ref('dim_clients')
+        format: dict
+        rows:
+          - {client_id: C-1, client_name: Client MM-001}
+      - input: ref('int_client_month')
+        format: dict
+        rows:
+          - {client_id: C-1, month: '2025-01-01', segment: mid_market, volume_eur: 1000000, revenue_eur: 150, economic_contribution_eur: 100}
+          - {client_id: C-1, month: '2025-02-01', segment: mid_market, volume_eur: 1000000, revenue_eur: 250, economic_contribution_eur: 200}
+          - {client_id: C-1, month: '2025-03-01', segment: mid_market, volume_eur: 1000000, revenue_eur: 350, economic_contribution_eur: 300}
+    expect:
+      format: dict
+      rows:
+        - {client_id: C-1, client_name: Client MM-001, segment: mid_market, month: '2025-01-01', month_index: 0, gross_margin_bps: 1.5, economic_margin_bps: 1.0, contribution_rolling_3m_eur: null, trend_slope_eur_per_month: 100, trend_flag: improving}
+        - {client_id: C-1, client_name: Client MM-001, segment: mid_market, month: '2025-02-01', month_index: 1, gross_margin_bps: 2.5, economic_margin_bps: 2.0, contribution_rolling_3m_eur: null, trend_slope_eur_per_month: 100, trend_flag: improving}
+        - {client_id: C-1, client_name: Client MM-001, segment: mid_market, month: '2025-03-01', month_index: 2, gross_margin_bps: 3.5, economic_margin_bps: 3.0, contribution_rolling_3m_eur: 600, trend_slope_eur_per_month: 100, trend_flag: improving}
+
+  # The other flag branches and the edge cases, on a window of Jan-Mar 2025.
+  #  B: 300, 200, 100 = slope -100, mean |c| 200, band 10: deteriorating.
+  #  C: 100, 101, 99 = slope -0.5, mean |c| 100, band 5: stable (a real but negligible drift).
+  #  D: one month only. The slope is NULL (one point has no slope), so it is flagged stable.
+  #  E: onboarded in February, so its first row has month_index 1, not 0. February had no trades
+  #     (zero volume, so NULL margins, and the coverage cost makes the month -100); March earned
+  #     300 on EUR 1m for +200: slope 300, mean |c| 150, band 7.5: improving. Two months of
+  #     history, so no rolling 3-month figure.
+  - name: mart_client_monthly_flags_and_edge_cases
+    model: mart_client_monthly
+    given:
+      - input: ref('int_window')
+        format: dict
+        rows:
+          - {window_start: '2025-01-01', window_end: '2025-03-31'}
+      - input: ref('dim_clients')
+        format: dict
+        rows:
+          - {client_id: B, client_name: Client B}
+          - {client_id: C, client_name: Client C}
+          - {client_id: D, client_name: Client D}
+          - {client_id: E, client_name: Client E}
+      - input: ref('int_client_month')
+        format: dict
+        rows:
+          - {client_id: B, month: '2025-01-01', segment: mid_market, volume_eur: 1000000, revenue_eur: 350, economic_contribution_eur: 300}
+          - {client_id: B, month: '2025-02-01', segment: mid_market, volume_eur: 1000000, revenue_eur: 250, economic_contribution_eur: 200}
+          - {client_id: B, month: '2025-03-01', segment: mid_market, volume_eur: 1000000, revenue_eur: 150, economic_contribution_eur: 100}
+          - {client_id: C, month: '2025-01-01', segment: mid_market, volume_eur: 1000000, revenue_eur: 150, economic_contribution_eur: 100}
+          - {client_id: C, month: '2025-02-01', segment: mid_market, volume_eur: 1000000, revenue_eur: 151, economic_contribution_eur: 101}
+          - {client_id: C, month: '2025-03-01', segment: mid_market, volume_eur: 1000000, revenue_eur: 149, economic_contribution_eur: 99}
+          - {client_id: D, month: '2025-03-01', segment: sme, volume_eur: 1000000, revenue_eur: 100, economic_contribution_eur: 50}
+          - {client_id: E, month: '2025-02-01', segment: sme, volume_eur: 0, revenue_eur: 0, economic_contribution_eur: -100}
+          - {client_id: E, month: '2025-03-01', segment: sme, volume_eur: 1000000, revenue_eur: 300, economic_contribution_eur: 200}
+    expect:
+      format: dict
+      rows:
+        - {client_id: B, month: '2025-01-01', month_index: 0, gross_margin_bps: 3.5, economic_margin_bps: 3.0, contribution_rolling_3m_eur: null, trend_slope_eur_per_month: -100, trend_flag: deteriorating}
+        - {client_id: B, month: '2025-02-01', month_index: 1, gross_margin_bps: 2.5, economic_margin_bps: 2.0, contribution_rolling_3m_eur: null, trend_slope_eur_per_month: -100, trend_flag: deteriorating}
+        - {client_id: B, month: '2025-03-01', month_index: 2, gross_margin_bps: 1.5, economic_margin_bps: 1.0, contribution_rolling_3m_eur: 600, trend_slope_eur_per_month: -100, trend_flag: deteriorating}
+        - {client_id: C, month: '2025-01-01', month_index: 0, gross_margin_bps: 1.5, economic_margin_bps: 1.0, contribution_rolling_3m_eur: null, trend_slope_eur_per_month: -0.5, trend_flag: stable}
+        - {client_id: C, month: '2025-02-01', month_index: 1, gross_margin_bps: 1.51, economic_margin_bps: 1.01, contribution_rolling_3m_eur: null, trend_slope_eur_per_month: -0.5, trend_flag: stable}
+        - {client_id: C, month: '2025-03-01', month_index: 2, gross_margin_bps: 1.49, economic_margin_bps: 0.99, contribution_rolling_3m_eur: 300, trend_slope_eur_per_month: -0.5, trend_flag: stable}
+        - {client_id: D, month: '2025-03-01', month_index: 2, gross_margin_bps: 1.0, economic_margin_bps: 0.5, contribution_rolling_3m_eur: null, trend_slope_eur_per_month: null, trend_flag: stable}
+        - {client_id: E, month: '2025-02-01', month_index: 1, gross_margin_bps: null, economic_margin_bps: null, contribution_rolling_3m_eur: null, trend_slope_eur_per_month: 300, trend_flag: improving}
+        - {client_id: E, month: '2025-03-01', month_index: 2, gross_margin_bps: 3.0, economic_margin_bps: 2.0, contribution_rolling_3m_eur: null, trend_slope_eur_per_month: 300, trend_flag: improving}
+
+  # Metric 11 on a window starting January 2025.
+  #  sme EURUSD, six months with trades: Jan, Feb, Apr, May, Jun, Jul (March has none, so the
+  #     month index skips 2: 0, 1, 3, 4, 5, 6). January has two trades, EUR 3m earning 2,700 and
+  #     EUR 1m earning 1,300: Σ / Σ = 4,000 / 4,000,000 = 10 bps, where the average of the two
+  #     trades' bps (9 and 13) would be 11. The monthly margins are 10, 9, 7, 6, 5, 4 = 10 minus
+  #     the month index, so the slope is exactly -1 bp a month = -12 bps a year. A row-number index
+  #     (0 to 5) would give a different slope, so this also pins the window-based index.
+  #  hedge_fund EURUSD, six months at a flat 3 bps: slope 0. Same pair, different segment, so it
+  #     is a separate regression.
+  #  sme EURGBP, five months: below the six-month minimum, so it has no rows at all.
+  - name: mart_spread_compression_slope_and_minimum_months
+    model: mart_spread_compression
+    given:
+      - input: ref('int_window')
+        format: dict
+        rows:
+          - {window_start: '2025-01-01', window_end: '2025-12-31'}
+      - input: ref('int_trades_enriched')
+        format: dict
+        rows:
+          - {segment: sme, currency_pair: EURUSD, trade_month: '2025-01-01', notional_eur: 3000000, gross_pnl_eur: 2700}
+          - {segment: sme, currency_pair: EURUSD, trade_month: '2025-01-01', notional_eur: 1000000, gross_pnl_eur: 1300}
+          - {segment: sme, currency_pair: EURUSD, trade_month: '2025-02-01', notional_eur: 1000000, gross_pnl_eur: 900}
+          - {segment: sme, currency_pair: EURUSD, trade_month: '2025-04-01', notional_eur: 1000000, gross_pnl_eur: 700}
+          - {segment: sme, currency_pair: EURUSD, trade_month: '2025-05-01', notional_eur: 1000000, gross_pnl_eur: 600}
+          - {segment: sme, currency_pair: EURUSD, trade_month: '2025-06-01', notional_eur: 1000000, gross_pnl_eur: 500}
+          - {segment: sme, currency_pair: EURUSD, trade_month: '2025-07-01', notional_eur: 1000000, gross_pnl_eur: 400}
+          - {segment: hedge_fund, currency_pair: EURUSD, trade_month: '2025-01-01', notional_eur: 1000000, gross_pnl_eur: 300}
+          - {segment: hedge_fund, currency_pair: EURUSD, trade_month: '2025-02-01', notional_eur: 1000000, gross_pnl_eur: 300}
+          - {segment: hedge_fund, currency_pair: EURUSD, trade_month: '2025-03-01', notional_eur: 1000000, gross_pnl_eur: 300}
+          - {segment: hedge_fund, currency_pair: EURUSD, trade_month: '2025-04-01', notional_eur: 1000000, gross_pnl_eur: 300}
+          - {segment: hedge_fund, currency_pair: EURUSD, trade_month: '2025-05-01', notional_eur: 1000000, gross_pnl_eur: 300}
+          - {segment: hedge_fund, currency_pair: EURUSD, trade_month: '2025-06-01', notional_eur: 1000000, gross_pnl_eur: 300}
+          - {segment: sme, currency_pair: EURGBP, trade_month: '2025-01-01', notional_eur: 1000000, gross_pnl_eur: 800}
+          - {segment: sme, currency_pair: EURGBP, trade_month: '2025-02-01', notional_eur: 1000000, gross_pnl_eur: 800}
+          - {segment: sme, currency_pair: EURGBP, trade_month: '2025-03-01', notional_eur: 1000000, gross_pnl_eur: 800}
+          - {segment: sme, currency_pair: EURGBP, trade_month: '2025-04-01', notional_eur: 1000000, gross_pnl_eur: 800}
+          - {segment: sme, currency_pair: EURGBP, trade_month: '2025-05-01', notional_eur: 1000000, gross_pnl_eur: 800}
+    expect:
+      format: dict
+      rows:
+        - {segment: sme, currency_pair: EURUSD, month: '2025-01-01', month_index: 0, n_months: 6, volume_eur: 4000000, gross_margin_bps: 10, compression_slope_bps_per_year: -12}
+        - {segment: sme, currency_pair: EURUSD, month: '2025-02-01', month_index: 1, n_months: 6, volume_eur: 1000000, gross_margin_bps: 9, compression_slope_bps_per_year: -12}
+        - {segment: sme, currency_pair: EURUSD, month: '2025-04-01', month_index: 3, n_months: 6, volume_eur: 1000000, gross_margin_bps: 7, compression_slope_bps_per_year: -12}
+        - {segment: sme, currency_pair: EURUSD, month: '2025-05-01', month_index: 4, n_months: 6, volume_eur: 1000000, gross_margin_bps: 6, compression_slope_bps_per_year: -12}
+        - {segment: sme, currency_pair: EURUSD, month: '2025-06-01', month_index: 5, n_months: 6, volume_eur: 1000000, gross_margin_bps: 5, compression_slope_bps_per_year: -12}
+        - {segment: sme, currency_pair: EURUSD, month: '2025-07-01', month_index: 6, n_months: 6, volume_eur: 1000000, gross_margin_bps: 4, compression_slope_bps_per_year: -12}
+        - {segment: hedge_fund, currency_pair: EURUSD, month: '2025-01-01', month_index: 0, n_months: 6, volume_eur: 1000000, gross_margin_bps: 3, compression_slope_bps_per_year: 0}
+        - {segment: hedge_fund, currency_pair: EURUSD, month: '2025-02-01', month_index: 1, n_months: 6, volume_eur: 1000000, gross_margin_bps: 3, compression_slope_bps_per_year: 0}
+        - {segment: hedge_fund, currency_pair: EURUSD, month: '2025-03-01', month_index: 2, n_months: 6, volume_eur: 1000000, gross_margin_bps: 3, compression_slope_bps_per_year: 0}
+        - {segment: hedge_fund, currency_pair: EURUSD, month: '2025-04-01', month_index: 3, n_months: 6, volume_eur: 1000000, gross_margin_bps: 3, compression_slope_bps_per_year: 0}
+        - {segment: hedge_fund, currency_pair: EURUSD, month: '2025-05-01', month_index: 4, n_months: 6, volume_eur: 1000000, gross_margin_bps: 3, compression_slope_bps_per_year: 0}
+        - {segment: hedge_fund, currency_pair: EURUSD, month: '2025-06-01', month_index: 5, n_months: 6, volume_eur: 1000000, gross_margin_bps: 3, compression_slope_bps_per_year: 0}
+
+  # Metric 8 on a book of seven clients (metrics.md section 6.5).
+  #  volume: the six clients that traded (G did not), 400 / 200 / 150 / 100 / 100 / 50 of 1,000.
+  #     top 5 = 950 / 1,000 = 0.95, and with only six clients top 10 and top 20 are 1.
+  #     HHI = 0.16 + 0.04 + 0.0225 + 0.01 + 0.01 + 0.0025 = 0.245.
+  #  revenue: only A to D have positive revenue (E earned exactly 0, F lost money): 50 / 30 /
+  #     20 / 10 of 110. HHI = (2,500 + 900 + 400 + 100) / 110^2 = 3,900 / 12,100 = 0.3223.
+  #  contribution_positive: A, B and D (20 / 10 / 5 of 35). HHI = (400 + 100 + 25) / 35^2 = 0.4286.
+  - name: mart_concentration_populations_and_hhi
+    model: mart_concentration
+    given:
+      - input: ref('mart_client_profitability')
+        format: dict
+        rows:
+          - {client_id: A, trade_count: 10, volume_eur: 400, revenue_eur: 50, economic_contribution_eur: 20}
+          - {client_id: B, trade_count: 5, volume_eur: 200, revenue_eur: 30, economic_contribution_eur: 10}
+          - {client_id: C, trade_count: 5, volume_eur: 150, revenue_eur: 20, economic_contribution_eur: -5}
+          - {client_id: D, trade_count: 5, volume_eur: 100, revenue_eur: 10, economic_contribution_eur: 5}
+          - {client_id: E, trade_count: 5, volume_eur: 100, revenue_eur: 0, economic_contribution_eur: -2}
+          - {client_id: F, trade_count: 5, volume_eur: 50, revenue_eur: -10, economic_contribution_eur: -30}
+          - {client_id: G, trade_count: 0, volume_eur: 0, revenue_eur: 0, economic_contribution_eur: -15}
+    expect:
+      format: dict
+      rows:
+        - {measure: volume, n_clients: 6, top5_share: 0.95, top10_share: 1, top20_share: 1, hhi: 0.245}
+        - {measure: revenue, n_clients: 4, top5_share: 1, top10_share: 1, top20_share: 1, hhi: 0.3223}
+        - {measure: contribution_positive, n_clients: 3, top5_share: 1, top10_share: 1, top20_share: 1, hhi: 0.4286}
+
+  # Headline KPIs on three clients, one of which did not trade. The client count is the two that
+  # traded; the contribution total still carries the idle client's coverage cost (-30).
+  #   volume 1.5m, revenue 300 = 2 bps; contribution 150 - 20 - 30 = 100 = 0.6667 bps.
+  # The hurdle rate is picked out of the parameters by name.
+  - name: mart_headline_kpis_totals
+    model: mart_headline_kpis
+    given:
+      - input: ref('mart_client_profitability')
+        format: dict
+        rows:
+          - {client_id: A, trade_count: 10, volume_eur: 1000000, revenue_eur: 200, economic_contribution_eur: 150}
+          - {client_id: B, trade_count: 5, volume_eur: 500000, revenue_eur: 100, economic_contribution_eur: -20}
+          - {client_id: C, trade_count: 0, volume_eur: 0, revenue_eur: 0, economic_contribution_eur: -30}
+      - input: ref('int_window')
+        format: dict
+        rows:
+          - {window_start: '2025-01-01', window_end: '2025-03-31'}
+      - input: ref('stg_parameters')
+        format: dict
+        rows:
+          - {name: capital_charge_bps, value: 0.1}
+          - {name: hurdle_rate_bps, value: 0.75}
+    expect:
+      format: dict
+      rows:
+        - {total_volume_eur: 1500000, total_revenue_eur: 300, total_contribution_eur: 100, gross_margin_bps: 2, economic_margin_bps: 0.6667, client_count: 2, trade_count: 15, window_start: '2025-01-01', window_end: '2025-03-31', hurdle_rate_bps: 0.75}

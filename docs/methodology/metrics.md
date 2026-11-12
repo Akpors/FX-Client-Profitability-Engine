@@ -323,3 +323,201 @@ margin_ex_coverage_bps       = contribution_ex_coverage_eur / volume_eur × 10,0
   - `client` is the client name (for example `Client LC-014`), which reads better in the brief's table; `client_id` is on `fct_trades`.
   - `buy_rate` and `sell_rate` are the dealer's two legs in EUR. On a client BUY the dealer buys EUR in the market and sells it to the client: `buy_rate = cover_rate`, `sell_rate = client_rate`. On a client SELL the dealer buys EUR from the client and sells it in the market: `buy_rate = client_rate`, `sell_rate = cover_rate`. Either way `(sell_rate − buy_rate) × volume` is the dealer's quote-currency gross P&L.
   - `volume` is `notional_eur`, `timestamp` is `trade_ts` and `pnl` is `gross_pnl_eur`. The unit test `fct_trades_brief_view_maps_legs_by_side` checks the leg mapping on the two trades of section 1.7.
+
+## 6. Client concentration (metric 8)
+
+**Model:** `marts.mart_concentration`, one row per `measure`, over the full window.
+
+```text
+share      = client's value / Σ value over the measure's own population
+topN_share = sum of the N largest shares                (N = 5, 10, 20; the whole population when it has N or fewer)
+hhi        = Σ share²                                   (0–1 scale)
+n_clients  = size of the measure's population
+```
+
+### 6.1 The three measures and their populations
+
+| `measure` | Value | Population |
+| --- | --- | --- |
+| `volume` | `volume_eur` | every client with at least one trade |
+| `revenue` | `revenue_eur` | every client with **positive** revenue |
+| `contribution_positive` | `economic_contribution_eur` | every client with **positive** economic contribution |
+
+Shares are computed **within the measure's own population**, so each measure's shares add to 1. `n_clients` is therefore the size of that population and can differ by measure: clients that lost money, or earned nothing, are outside the revenue and contribution populations, and clients that never traded are outside all three.
+
+**Why revenue and contribution use positive values only.** A concentration index describes how a positive total is split between holders. A client with negative revenue (a gross P&L below zero, which a bad run of covers can produce) would have a negative share. Then the shares are no longer between 0 and 1: another client's share can pass 100%, and HHI can pass 1 (shares of 1.5 and −0.5 give 2.5). Restricting to positive values keeps every share between 0 and 1 and the HHI bounds below true for any book. The cost is that the revenue measure describes the clients that earned revenue; `n_clients` shows how many that is, and a `revenue` population smaller than the `volume` one is itself the finding that some clients lost money on gross P&L. Volume cannot be negative, so it takes every client that traded. The `contribution_positive` name says the same thing: it is the concentration of the contribution earned by clients that earn one, not of the net total (which has negative contributors in it, section 3.7).
+
+**Ties.** Clients with equal values are ranked by `client_id`, so the top-N set is the same on every run.
+
+**A measure with an empty population has no row** (for example `contribution_positive` in a book where no client is profitable). The HHI bounds test then has nothing to divide by.
+
+### 6.2 HHI scale
+
+`hhi` is on a **0–1 scale**: the sum of squared shares as fractions. Antitrust practice (the US Department of Justice's merger guidelines, for example) multiplies by 10,000 to get a 0–10,000 index, so an HHI of `0.05` here is `500` there. This page and the model use 0–1 throughout so that the bounds are simple, and any display that wants the antitrust scale multiplies by 10,000.
+
+- **Floor:** `1 / n_clients`, reached when every client in the population has an equal share.
+- **Ceiling:** `1`, reached when one client holds everything.
+- **Reading:** `1 / hhi` is the *effective number of equal-sized clients*. An HHI of 0.05 behaves like a book of 20 equal clients, however many names are actually on it. Compare `1 / hhi` with `n_clients` to see how far the real book is from an even split.
+
+### 6.3 On the desk
+
+Compare the three measures with each other, because the gap is the story. Volume concentrated in a few names that hold a much smaller share of revenue, and a smaller share still of contribution, is the volume-trap picture at book level: the desk's biggest flows are not where it makes its money. Top-5 and top-20 are the dependency numbers a head of desk quotes ("five clients are X% of our contribution"), and the HHI is the single number that tracks the same thing without choosing a cut-off.
+
+### 6.4 What is checked
+
+| Check | Where | What it pins |
+| --- | --- | --- |
+| `assert_hhi_bounds` | `tests/` | `1 / n_clients − 1e-9 ≤ hhi ≤ 1` for every measure |
+| `accepted_values`, `unique`, `not_null` | `_marts.yml` | `measure` is one of the three and appears once; no NULL shares or HHI |
+| Unit test `mart_concentration_populations_and_hhi` | `_marts.yml` | The populations and the arithmetic of section 6.5 |
+
+### 6.5 Worked example
+
+Seven clients; these are the rows of the unit test.
+
+| Client | A | B | C | D | E | F | G |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Trades | 10 | 5 | 5 | 5 | 5 | 5 | 0 |
+| Volume | 400 | 200 | 150 | 100 | 100 | 50 | 0 |
+| Revenue | 50 | 30 | 20 | 10 | 0 | −10 | 0 |
+| Contribution | 20 | 10 | −5 | 5 | −2 | −30 | −15 |
+
+| Measure | Population | Shares | `top5_share` | `hhi` |
+| --- | --- | --- | --- | --- |
+| `volume` | A–F (G did not trade), 6 clients | 0.40, 0.20, 0.15, 0.10, 0.10, 0.05 | 0.95 | 0.16 + 0.04 + 0.0225 + 0.01 + 0.01 + 0.0025 = 0.245 |
+| `revenue` | A–D (E earned 0, F lost money), 4 clients | 50, 30, 20, 10 of 110 | 1 (4 clients, so top 5 is everyone) | (2,500 + 900 + 400 + 100) / 110² = 0.3223 |
+| `contribution_positive` | A, B, D, 3 clients | 20, 10, 5 of 35 | 1 | (400 + 100 + 25) / 35² = 0.4286 |
+
+## 7. Spread compression (metric 11)
+
+**Model:** `marts.mart_spread_compression`, grain **month × segment × currency pair**, for months in which that segment traded that pair.
+
+```text
+gross_margin_bps               = Σ gross_pnl_eur / Σ notional_eur × 10,000        per month × segment × pair
+compression_slope_bps_per_year = regr_slope(gross_margin_bps, month_index) × 12    per segment × pair
+```
+
+`month_index` counts whole months since `window_start` (from `int_window`, section 2.1), 0 for the first month of the window. The slope is the ordinary least-squares slope of the monthly margin on the month index: bps per month, times 12 for bps per year. **Negative means the margin is compressing.** Each row carries its segment × pair's slope, repeated, and `n_months`, the number of months the regression used.
+
+### 7.1 Why the monthly margin is a ratio of sums
+
+Each monthly cell is the volume-weighted margin, `Σ P&L / Σ notional`, never the average of trade-level bps (section 1.2). One EUR 10m ticket and one EUR 10k ticket in the same month carry their volumes in the cell. Months with no trades have no row: the margin of nothing is undefined, and a zero would drag the slope. The month index keeps its calendar spacing, so a gap in the trading shows as a gap in the index (0, 1, 3, 4 …), not as adjacent months.
+
+### 7.2 Why the regression is not volume-weighted
+
+The slope is a plain (unweighted) least-squares fit across the monthly cells. Volume weighting is already done inside each cell, where it matters (the ratio of sums). Across months, each month is one observation of "what margin did this segment realise on this pair this month", and the question the slope answers is whether that margin is trending, not whether the euros are. A weighted fit would let the two or three biggest months decide the trend for a segment whose flow is lumpy, and the lumpiest flow (large tickets, few clients) is exactly where one trade swings a month. The price of the unweighted choice is that a thin month counts as much as a thick one. The slope of a pair with few trades a month is therefore noisy, and the average of slopes across the pairs of a segment is pulled around by its thinnest pairs. **Read a segment's compression from the median slope or from the volume-weighted average of its pair slopes, not from the plain mean of the pair slopes.**
+
+The measure is also not like-for-like. It is the realised margin on whatever traded that month, so a change in the ticket-size or client mix inside a segment × pair moves it as well as a change in the price any client is given. It is the margin the desk actually earned, which is what a desk head asks about, and not an estimate of repricing.
+
+### 7.3 Minimum sample
+
+Only segment × pair combinations with trades in **at least 6 distinct months** are kept. A regression on fewer points is a line through noise, and the rule guarantees the slope is never NULL (a single month has no slope at all). The threshold is `min_months` at the top of `mart_spread_compression.sql`, and `n_months` on every row shows the sample size.
+
+At the shipped configuration (seed 42) the rule **drops 0 of the 90 combinations** that have trades: every segment trades every pair in 23 or 24 of the 24 window months, so all 90 are kept (2,158 rows). The rule matters for a smaller book, a shorter window or a pair that a segment barely trades. If the book is regenerated with different parameters, the count changes: compare `count(distinct segment, currency_pair)` in the mart with the same count over `int_trades_enriched`.
+
+### 7.4 On the desk
+
+A negative slope means the same flow is paying the desk less than it used to, which is competitive pressure in numbers. Compression is the early warning that sits ahead of a client-level loss: a segment can still be profitable at the book level while its margin on a pair has fallen every month for a year. Because the grain is segment × pair, it also says where: whether it is in the liquid majors, where it is expected, or in the pairs that carry the margin.
+
+### 7.5 What is checked
+
+| Check | Where | What it pins |
+| --- | --- | --- |
+| `not_null` on `compression_slope_bps_per_year` | `_marts.yml` | The slope exists on every row, so the minimum-sample rule is working |
+| `unique` on month × segment × pair | `_marts.yml` | One row per cell |
+| Unit test `mart_spread_compression_slope_and_minimum_months` | `_marts.yml` | Section 7.6 |
+
+### 7.6 Worked example
+
+Window starting 1 January 2025. Segment `sme`, pair EURUSD, trades in January, February and April to July (March has none):
+
+| Month | `month_index` | Trades | `gross_margin_bps` |
+| --- | --- | --- | --- |
+| Jan | 0 | EUR 3m earning 2,700 and EUR 1m earning 1,300 | 4,000 / 4,000,000 × 10,000 = **10** (the average of the two trades' 9 and 13 bps would be 11) |
+| Feb | 1 | EUR 1m earning 900 | 9 |
+| Apr | 3 | EUR 1m earning 700 | 7 |
+| May | 4 | EUR 1m earning 600 | 6 |
+| Jun | 5 | EUR 1m earning 500 | 5 |
+| Jul | 6 | EUR 1m earning 400 | 4 |
+
+The margin is 10 minus the month index every month, so the slope is exactly −1 bp a month, and `compression_slope_bps_per_year` is **−12**. Indexing the six rows 0 to 5 instead of by calendar month would give a different slope, which is why the index comes from the window. A `hedge_fund` EURUSD series at a flat 3 bps has slope 0 and is regressed separately from the `sme` one. An `sme` EURGBP series with trades in only five months has no rows at all.
+
+## 8. Client profitability trends (metric 12)
+
+**Model:** `marts.mart_client_monthly`, one row per client per month on the book (`int_client_month`, so zero-trade months are included), with the client's name and these additions:
+
+| Column | Definition |
+| --- | --- |
+| `month_index` | Whole months since `window_start` (from `int_window`). A client onboarded mid-window starts at its onboarding month, not at 0 |
+| `gross_margin_bps` | `revenue_eur / nullif(volume_eur, 0) × 10,000`, NULL for a month with no volume |
+| `economic_margin_bps` | `economic_contribution_eur / nullif(volume_eur, 0) × 10,000`, NULL for a month with no volume |
+| `contribution_rolling_3m_eur` | The **sum** of `economic_contribution_eur` over the current month and the two before it |
+| `trend_slope_eur_per_month` | `regr_slope(economic_contribution_eur, month_index)` over the client's months, repeated on each of its rows |
+| `trend_flag` | `improving`, `stable` or `deteriorating`, below |
+
+### 8.1 Rolling 3-month contribution
+
+A **sum, not a mean**: `contribution_rolling_3m_eur` for March is January + February + March. It is in the same units as a month's contribution multiplied by three, which keeps it directly comparable with a quarter's P&L. Divide by 3 for a monthly average. It is NULL until the client has three months of history (its first two months on the book), so a two-month figure is never plotted beside three-month ones and read as a drop. The window is three *calendar* months, so a missing month would show as NULL and not be silently skipped.
+
+### 8.2 Trend slope and flag
+
+```text
+trend_slope_eur_per_month = regr_slope(economic_contribution_eur, month_index)       per client, over all its months
+
+trend_flag = stable          when |slope| < 0.05 × mean(|economic_contribution_eur|) over the client's months
+             improving       otherwise, when slope > 0
+             deteriorating   otherwise, when slope < 0
+```
+
+The slope is in EUR per month: how much the client's monthly contribution is changing, month after month. The flag compares it with the scale of the client's own monthly contribution. A change of less than 5% of a typical month's absolute contribution, month after month, is treated as noise: a slope of EUR 2 a month on a client that earns or loses EUR 100 a month is not a trend, and the same EUR 2 on a client at EUR 10 a month is. The mean uses the absolute contribution so that a client whose months swing between profit and loss does not look small by averaging to zero.
+
+- **A client with one month** (onboarded in the last month of the window) has no slope: one point has none, so `trend_slope_eur_per_month` is NULL. It is flagged **`stable`**, because there is no evidence of a direction, not because it is known to be steady.
+- **A zero slope** is `stable`, including when the mean is zero.
+- The slope uses the calendar month index, so a client onboarded in month 10 is regressed on 10 to 23 and not on 0 to 13. The slope's units are the same for every client whenever it joined.
+
+### 8.3 On the desk
+
+The window total in section 3 hides direction. A client that earned EUR 120k over two years can have earned it at EUR 5k a month, steadily, or at EUR 9k a month falling to EUR 1k, and the account plan differs. The flag turns 24 months of contribution into one word per client for the review list (`deteriorating` first), and the rolling quarter is the chart that supports it.
+
+### 8.4 What is checked
+
+| Check | Where | What it pins |
+| --- | --- | --- |
+| `accepted_values`, `not_null` on `trend_flag` | `_marts.yml` | Every row has one of the three flags |
+| `unique` on client × month | `_marts.yml` | One row per client-month |
+| Unit test `mart_client_monthly_improving_trend` | `_marts.yml` | The brief's example: contributions of 100, 200, 300 over three months give slope 100 and `improving`; margins; the rolling sum of 600 in March only |
+| Unit test `mart_client_monthly_flags_and_edge_cases` | `_marts.yml` | `deteriorating`, a negligible drift staying `stable`, a single month (NULL slope, `stable`), a client onboarded in month 1 of the window starting at `month_index` 1, a zero-volume month with NULL margins |
+
+### 8.5 Worked example
+
+Window of January to March 2025, client volume EUR 1m a month.
+
+| Client | Contribution (Jan, Feb, Mar) | Slope | Mean \|contribution\| | 5% band | Flag |
+| --- | --- | --- | --- | --- | --- |
+| A | 100, 200, 300 | +100 | 200 | 10 | `improving` |
+| B | 300, 200, 100 | −100 | 200 | 10 | `deteriorating` |
+| C | 100, 101, 99 | −0.5 | 100 | 5 | `stable` (drift inside the band) |
+| D | Mar only: 50 | NULL | 50 | | `stable` (one month) |
+| E | Feb: −100 (no trades), Mar: +200 | +300 (on `month_index` 1 and 2) | 150 | 7.5 | `improving` |
+
+Client A's margins are 1.0, 2.0 and 3.0 bps economic (`100 / 1,000,000 × 10,000` and so on) and its rolling 3-month figure is NULL, NULL, then 100 + 200 + 300 = 600.
+
+## 9. Headline KPIs
+
+**Model:** `marts.mart_headline_kpis`, one row for the whole book over the window.
+
+| Column | Definition |
+| --- | --- |
+| `total_volume_eur` | Σ client `volume_eur` |
+| `total_revenue_eur` | Σ client `revenue_eur` |
+| `total_contribution_eur` | Σ client `economic_contribution_eur` |
+| `gross_margin_bps` | `total_revenue_eur / total_volume_eur × 10,000`, the book's volume-weighted gross margin |
+| `economic_margin_bps` | `total_contribution_eur / total_volume_eur × 10,000` |
+| `client_count` | Clients with **at least one trade** in the window |
+| `trade_count` | Σ client `trade_count` |
+| `window_start`, `window_end` | From `int_window` (section 2.1), the single definition of the window |
+| `hurdle_rate_bps` | The `hurdle_rate_bps` parameter, looked up by name: the minimum economic margin, in bps of volume, for a client to earn its place |
+
+The totals are sums of `mart_client_profitability`, so they reconcile with the client mart and, through the section 3.12 tests, with the trades. `total_contribution_eur` includes the coverage cost of clients that did not trade: the desk pays it whether or not they traded, so a book total that left it out would overstate what the desk kept. `client_count` is therefore the clients that traded, not every client on the book. Comparing `economic_margin_bps` with `hurdle_rate_bps` says whether the book as a whole earns its hurdle; the per-client version is the volume-margin map (spec section 6.1).
+
+**Worked example** (the unit test `mart_headline_kpis_totals`). Three clients: A with 10 trades, EUR 1m volume, revenue 200 and contribution 150; B with 5 trades, EUR 500k, revenue 100 and contribution −20; C with no trades and contribution −30 (coverage). Volume 1.5m, revenue 300, contribution 150 − 20 − 30 = 100. Gross margin `300 / 1,500,000 × 10,000 = 2` bps, economic margin `100 / 1,500,000 × 10,000 = 0.6667` bps, `client_count` 2 (C did not trade), `trade_count` 15. The hurdle rate is picked out of the parameter table by name, not by position.
