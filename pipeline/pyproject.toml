@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fxengine"
+version = "0.1.0"
+description = "Synthetic spot-FX trade book generator and loader for the FX client profitability engine"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy",
+    "pandas",
+    "pydantic>=2",
+    "PyYAML",
+    "httpx",
+    "psycopg[binary]>=3",
+    "SQLAlchemy>=2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+
+[project.scripts]
+fxengine = "fxengine.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Cache goes to /tmp so a bind-mounted ./pipeline stays clean whatever uid runs the container.
+cache_dir = "/tmp/pytest_cache"
+markers = [
+    "slow: slow tests (run with `make test-slow`)",
+    "integration: tests that need the Postgres `db` service (run with `make test-integration`)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+cache-dir = "/tmp/ruff_cache"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

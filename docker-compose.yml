@@ -1,0 +1,60 @@
+name: fxengine
+
+x-fx-db-env: &fx-db-env
+  FX_DB_HOST: ${FX_DB_HOST:-db}
+  # Inside the compose network Postgres always listens on 5432; FX_DB_PORT in .env
+  # is only the host-side port mapping on the db service below.
+  FX_DB_PORT: "5432"
+  FX_DB_NAME: ${FX_DB_NAME:-fxengine}
+  FX_DB_USER: ${FX_DB_USER:-fxengine}
+  FX_DB_PASSWORD: ${FX_DB_PASSWORD:-fxengine_local}
+
+services:
+  db:
+    image: postgres:16.15-bookworm
+    environment:
+      POSTGRES_DB: ${FX_DB_NAME:-fxengine}
+      POSTGRES_USER: ${FX_DB_USER:-fxengine}
+      POSTGRES_PASSWORD: ${FX_DB_PASSWORD:-fxengine_local}
+    ports:
+      - "127.0.0.1:${FX_DB_PORT:-5433}:5432"
+    volumes:
+      - fxengine_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  # One-shot: run with `docker compose run --rm pipeline <command>` (see Makefile).
+  pipeline:
+    build: ./pipeline
+    environment: *fx-db-env
+    volumes:
+      - ./pipeline:/app
+      - ./docs:/docs
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # One-shot: run with `docker compose run --rm dbt <dbt args>` (see Makefile).
+  dbt:
+    build: ./dbt
+    # The official dbt-postgres images are published for linux/amd64 only.
+    platform: linux/amd64
+    environment:
+      <<: *fx-db-env
+      DBT_PROFILES_DIR: /dbt
+    volumes:
+      - ./dbt:/dbt
+    ports:
+      # Only published by `make dbt-docs` (docker compose run --service-ports).
+      - "127.0.0.1:${FX_DBT_DOCS_PORT:-8081}:8081"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  fxengine_pgdata:
+    name: fxengine_pgdata
