@@ -1,6 +1,6 @@
 """Command-line entry point for the fxengine pipeline.
 
-``fetch-ecb`` and ``run-all`` are real. ``generate``, ``load`` and ``param-sheet`` are stubs that
+``fetch-ecb``, ``run-all`` and ``param-sheet`` are real. ``generate`` and ``load`` are stubs that
 return 0 until the task that implements them wires them up (``run-all`` does what ``generate``
 and ``load`` would, in one go).
 """
@@ -16,8 +16,9 @@ from pathlib import Path
 
 import psycopg
 import sqlalchemy.exc
+import yaml
 
-from fxengine import ecb
+from fxengine import ecb, param_sheet
 from fxengine.config import DEFAULT_CONFIG_PATH, load_config
 from fxengine.load import LoadError, assemble_raw_tables, engine_from_env, write_raw
 
@@ -96,6 +97,29 @@ def _run_all(args: argparse.Namespace) -> int:
     return 0
 
 
+def _param_sheet(args: argparse.Namespace) -> int:
+    """Render the calibration parameter sheet from the config and the rationale file.
+
+    The sheet is built in memory first, so a bad config or a missing rationale key leaves any
+    existing sheet untouched.
+    """
+    try:
+        cfg = load_config(args.config)
+        rationale = param_sheet.load_rationale(args.rationale)
+        sheet = param_sheet.render_parameter_sheet(cfg, rationale)
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(sheet, encoding="utf-8")
+    except KeyError as exc:
+        print(f"fxengine param-sheet: error: {exc.args[0]}", file=sys.stderr)
+        return 1
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        # ValueError covers a bad config (pydantic's ValidationError) and a bad rationale file.
+        print(f"fxengine param-sheet: error: {' '.join(str(exc).split())}", file=sys.stderr)
+        return 1
+    print(f"fxengine param-sheet: wrote {args.out} ({len(sheet.splitlines())} lines)")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="fxengine",
@@ -106,7 +130,6 @@ def build_parser() -> argparse.ArgumentParser:
     for name, help_text in (
         ("generate", "Generate the synthetic client book and trade book"),
         ("load", "Load generated tables into the Postgres raw schema"),
-        ("param-sheet", "Render docs/methodology/parameter-sheet.md"),
     ):
         sub.add_parser(name, help=help_text).set_defaults(handler=_stub(name))
 
@@ -150,6 +173,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="Generate everything and print the row counts, but do not touch Postgres",
     )
     run_all.set_defaults(handler=_run_all)
+
+    sheet = sub.add_parser(
+        "param-sheet",
+        help="Render the calibration parameter sheet (docs/methodology/parameter-sheet.md)",
+    )
+    sheet.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_CONFIG_PATH,
+        help="Generator config (default: %(default)s)",
+    )
+    sheet.add_argument(
+        "--rationale",
+        type=Path,
+        default=param_sheet.DEFAULT_RATIONALE_PATH,
+        help="One-line rationale for each parameter (default: %(default)s)",
+    )
+    sheet.add_argument(
+        "--out",
+        type=Path,
+        default=param_sheet.DEFAULT_SHEET_PATH,
+        help="Where to write the sheet (default: %(default)s)",
+    )
+    sheet.set_defaults(handler=_param_sheet)
 
     return parser
 

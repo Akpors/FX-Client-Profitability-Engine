@@ -1,0 +1,76 @@
+# One-line "why" for every parameter on the calibration sheet (docs/methodology/parameter-sheet.md).
+#
+# Each text explains why the builder's DEFAULT is plausible for a European spot-FX dealer. They are
+# illustrative defaults, not market data, and none comes from a real firm or client. The owner
+# overwrites values from experience at the calibration gate (spec section 11.1); if a value moves a
+# long way, reword the line here too, then regenerate the sheet with `make param-sheet`.
+#
+# Key scheme (a flat mapping; `make param-sheet` fails and names the first missing key). The sheet
+# shows the segment parameters as a grid, parameters down the side and the six segments across,
+# with one reason per parameter row, so the segment keys explain a whole row, not one cell:
+#
+#   markup.<tier>                  one line per markup row; <tier> is g10_major, g10_minor, cee or em
+#   markup.segment_ladder          why markups differ by segment (across every markup row)
+#   compression                    compression_per_year, all segments
+#   adverse_selection              adverse_selection_bps (mean and sd), all segments
+#   ops_cost                       ops_cost_per_ticket_eur, all segments
+#   coverage                       coverage_cost_eur_per_month, all segments
+#   credit_weight                  credit_weight, all segments
+#   client_markup_sigma            client_markup_sigma, the per-client negotiation scatter
+#   ticket_band.<label>            the band label exactly as written in generator.yaml
+#   volume_tier.<n>                n counts from 1 in the order of volume_tiers in generator.yaml
+#   settlement_weight.cls          cost.settlement_weight_cls
+#   settlement_weight.non_cls      cost.settlement_weight_non_cls
+#   capital_charge_bps             cost.capital_charge_bps
+#   hurdle_rate_bps                cost.hurdle_rate_bps
+#   legacy_deal.probability        legacy_deal.probability
+#   legacy_deal.discount_pct       legacy_deal.discount_pct
+#   pair_annual_vol                one line for the pair volatility row
+#
+# A row line names the segments it contrasts, so it still reads right if a value moves a little;
+# if the owner moves one a long way, reword the line too. Keep each to about 150 characters so it
+# stays on one printed line.
+
+# --- Segment parameters: markup by liquidity tier ----------------------------------------------
+markup.g10_major: "Deepest liquidity and the cheapest cover for the dealer, so the tightest markup in every segment"
+markup.g10_minor: "Good liquidity but wider cover spreads and less natural flow to net against than the majors"
+markup.cee: "Thin interbank liquidity and wide cover spreads, so well above the G10 pairs"
+markup.em: "The thinnest liquidity, wide and jumpy cover spreads and the most inventory risk: the widest tier"
+markup.segment_ladder: "Tightest for hedge funds and asset managers (competitive panels), then platforms and large corporates, then mid-market; SMEs pay the rate card"
+
+# --- Segment parameters: the rest ---------------------------------------------------------------
+compression: "None for rate-card SMEs; slow for corporates and asset managers; fastest for hedge funds and platforms, whose flow is shopped across banks"
+adverse_selection: "Highest for informed hedge fund flow, then asset managers' large clips; the rest hedge real needs, so cover lands near mid"
+ops_cost: "Highest for SMEs and corporates (manual confirmations, queries); lowest for automated, straight-through hedge funds and platforms"
+coverage: "Dedicated bankers for large corporates, asset managers and hedge funds; shared for mid-market and platforms; almost none for SMEs"
+credit_weight: "1.0 is the average counterparty: real money and large corporates below it, leveraged funds and platforms above, SMEs highest"
+client_markup_sigma: "Widest for bilateral large-corporate deals; narrower where a rate card or panel competition keeps similar clients' prices close together"
+
+# --- Ticket-size bands (multiplier on the base markup) -----------------------------------------
+ticket_band.Under 25k: "The smallest tickets cost the most to handle, so they carry the widest markup"
+ticket_band.25k-100k: "Still small enough that the price is a rate card, not a negotiation"
+ticket_band.100k-500k: "Reference band: the base markups in section 1 are stated for this size"
+ticket_band.500k-2m: "Size starts to buy a better price: a real concession for the flow"
+ticket_band.2m-10m: "Large clips are shopped across banks and priced near the cost of cover"
+ticket_band.10m+: "Block size: the tightest price on the grid, though still above zero"
+
+# --- Volume-discount tiers ----------------------------------------------------------------------
+volume_tier.1: "Everyone starts here: no volume discount below the first threshold"
+volume_tier.2: "A first relationship discount once the client is worth a coverage conversation"
+volume_tier.3: "Mid-sized flow is worth competing for, so the discount steps up"
+volume_tier.4: "Large active clients get a real concession for keeping the flow"
+volume_tier.5: "Strategic relationships: heavy discounting to hold flow on a competitive panel"
+volume_tier.6: "The biggest flow in the book: rival banks always bid for it, so the deepest discount"
+
+# --- Settlement, capital and hurdle -------------------------------------------------------------
+settlement_weight.cls: "Payment-versus-payment through CLS removes principal risk: the baseline"
+settlement_weight.non_cls: "Bilateral settlement leaves principal at risk, so it carries a higher weight"
+capital_charge_bps: "About 2 days' exposure x 8% capital x 12% cost of equity, cut back for CLS flow"
+hurdle_rate_bps: "Judgement call: below it, volume does not pay for its own costs and capital"
+
+# --- Legacy deals -------------------------------------------------------------------------------
+legacy_deal.probability: "Old discounts are rarely repriced: a fifth of pre-window clients still hold one"
+legacy_deal.discount_pct: "A quarter off: a plausible past concession to win the mandate, on top of tier"
+
+# --- Pairs --------------------------------------------------------------------------------------
+pair_annual_vol: "Rough 1-2 year realised level of each EUR cross; DKK is pegged, TRY is diffusion only"
