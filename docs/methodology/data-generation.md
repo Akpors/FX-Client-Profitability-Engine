@@ -129,3 +129,121 @@ That total is sensitive to the draw of a few busy clients. Across 200 different 
 ### 1.9 Reproducibility
 
 `generate_clients` takes the configuration, the 24-month window and a single `numpy.random.Generator`, and uses nothing else for randomness (no global random state). The same configuration, window and generator state give an identical frame. The default seed is 42.
+
+## 2. Market mid
+
+Code: `fxengine.market` (`trading_grid`, `simulate_mid_path`, `mid_at`). Configuration: `trading_hours_utc`, `fix_time_utc` and each pair's `annual_vol` in `generator.yaml`, validated by `fxengine.config`.
+
+Every trade needs a market price at the minute it happens. Markups, cover slippage and the dealer's gross P&L are all measured from the market mid, and the only real price data in the project is one ECB reference rate per currency per business day. This stage fills in the day between the fixes: it builds a synthetic mid for every trading minute that passes through each real fix and moves realistically in between.
+
+### 2.1 What is real and what is synthetic
+
+The fixes are real. The mid between them is synthetic, a random path drawn by the generator. At each ECB fix timestamp the mid equals the published fix exactly, to the last digit. Everywhere else it is an invention that is consistent with the fixes on either side of it. Nothing in the intraday path is a recorded price, and nothing about it should be read as a statement about how EURUSD (or any other pair) actually traded at 09:42 on a given day.
+
+### 2.2 The trading grid
+
+The mid is simulated on a grid of trading minutes, in UTC:
+
+- Each business day covers the half-open interval `[open, close)`, so 07:00 to 16:00 at one-minute resolution is 540 points: 07:00 is the first, 15:59 the last, and 16:00 is not on the grid.
+- Business days are whatever dates the caller passes; in the pipeline they are the dates the ECB published a fix. A weekend or a TARGET holiday has no points on the grid at all.
+- The 13:10 UTC fix is a grid point on every day. The fix time must sit on the grid's step lattice (`open + n x step_minutes`) and inside `[open, close)`. The code rejects a fix time that does not, instead of squeezing in an extra off-grid point, because an extra point would shorten one step and break the equal-sized steps the bridge assumes. At the default one-minute step, any whole-minute time inside the day qualifies. The grid takes `step_minutes` as a parameter, but the pipeline uses one minute.
+
+Over the committed two-year snapshot the grid holds about 283,000 points between the first and last fix.
+
+### 2.3 The Brownian bridge
+
+Between two consecutive fixes `f_k` and `f_k+1`, which are `T` grid steps apart, the log mid is a Brownian bridge:
+
+```
+X(t) = log f_k + (t / T) x (log f_k+1 - log f_k) + B(t) - (t / T) x B(T)        t = 0 ... T
+mid(t) = exp(X(t))
+```
+
+`B` is the running sum of independent normal draws, one per grid step, each with the same variance. The three parts do different jobs:
+
+- `log f_k + (t / T) x (log f_k+1 - log f_k)` carries the real move. It is a straight line in log space from one fix to the next, so the part of the path that comes from data is the ECB's own day-to-day change, spread evenly across the trading minutes.
+- `B(t)` is the random wiggle, a random walk that starts at zero.
+- `- (t / T) x B(T)` tilts the random walk so that it comes back to zero at the next fix. Without it the path would drift away from the next fix by whatever the walk happened to reach.
+
+The result starts at one fix, ends at the next, and in between looks like an ordinary random price path whose noise is largest midway and zero at both ends.
+
+**Step variance.** Each step has variance
+
+```
+sigma_step^2 = annual_vol^2 / (252 x trading_minutes_per_day) x step_minutes
+```
+
+where `trading_minutes_per_day` is the number of points per day times `step_minutes` (540 at the defaults). A trading day therefore carries variance `annual_vol^2 / 252`, the usual square-root-of-time scaling with 252 trading days a year, whatever resolution the grid uses. The code reads the length of the trading day off the grid itself.
+
+On the committed snapshot the realised annualised volatility of the minute returns for EURUSD comes out at 7.0%, the configured value. A test in the repo pins the same property on flat fixes: realised variance over a fix-to-fix day matches `annual_vol^2 / 252` at one-minute and five-minute grids.
+
+**Implementation.** The bridge is vectorised. One call to the random generator draws every increment for the whole path (one fewer than the number of grid points, whatever the volatility), a single cumulative sum builds the walk, and each segment's walk is that cumulative sum minus its value at the segment's first fix. There is no Python loop over grid points or segments, and the path for one pair takes about 15 milliseconds on the full snapshot. A test checks the vectorised path against a plain per-segment loop written from the formula above.
+
+**It never extrapolates.** The function raises an error if any grid point lies before the first fix or after the last one, or if any fix timestamp is not on the grid, rather than guess a price where it has no fix to anchor to. A caller therefore builds the grid over the buffered business days (the snapshot reaches ten days past each end of the 24-month window, so there are fixes on both sides) and trims it to the span from the first fix to the last.
+
+### 2.4 Why weekends and holidays add no variance
+
+A weekend is not 48 hours of price movement in this model, because nothing trades and nothing is simulated. Friday's last grid point (15:59) and Monday's first (07:00) are adjacent points on the grid, and the step between them has the same variance as any other single step. The move from the Friday fix to the Monday fix is spread across the same 540 steps as any other pair of consecutive fixes. A Monday fix that has moved a lot since Friday simply shows up as a steeper slope in the bridge's linear term; it does not add noise. The same goes for a TARGET holiday: the missing day has no grid points, and the bridge runs from the fix before it to the fix after it in the usual 540 steps.
+
+This is a deliberate choice about *where* volatility lives. Real weekends do carry gap risk, but that risk arrives with the real fixes, which are the data. The generator adds noise only for the minutes the desk is open and does not stack extra overnight or weekend noise on top.
+
+A test pins the consequence: a path across a Friday-to-Monday gap has no missing values and no single step larger than 0.5%, and every fix-to-fix segment, weekend or not, spans exactly the same number of grid steps.
+
+### 2.5 The fixed 13:10 UTC fix time
+
+The ECB computes its reference rate in a concertation procedure at about 14:10 CET. In winter CET is UTC+1, so that is 13:10 UTC, which is the value in `fix_time_utc`. In summer the clocks are on CEST (UTC+2), and the same 14:10 local time is 12:10 UTC.
+
+The generator ignores that shift and puts the fix at 13:10 UTC all year. This is a simplification, and it has two effects:
+
+- In summer the synthetic fix sits an hour later in the day than the real one (13:10 UTC is 15:10 CEST). The *level* of every fix is the real ECB value, so the data is not wrong. Only the clock time at which the mid is pinned to it is off, by an hour, for the roughly seven summer months of each year.
+- The trading day (07:00 to 16:00 UTC, a London and Frankfurt-centred window) is also fixed in UTC, so the fix sits at the same place in the trading day all year, and the share of trades that land near the fix does not change with the clocks.
+
+The analysis compares each trade with its date's fix, not with a fix matched to the trade's time, so the clock time of the pin matters only for how the mid behaves around it (see 2.7).
+
+### 2.6 Volatility by pair
+
+Each pair has its own annual volatility in `generator.yaml`. It is the volatility of the log rate, as a fraction, and it sets the size of the intraday noise. The values are the builder's rough 1 to 2 year levels for each EUR cross, chosen to be plausible and sensibly ordered (the pegged DKK barely moves, TRY and ZAR move the most). They are not measured from data, and the owner reviews them at the calibration gate with the other defaults.
+
+| Pair | Liquidity tier | Annual vol | Sd of one day's noise (bps) | Largest noise sd, mid-segment (bps) |
+|---|---|---|---|---|
+| EURUSD | g10_major | 7.0% | 44.1 | 22.0 |
+| EURGBP | g10_major | 6.0% | 37.8 | 18.9 |
+| EURJPY | g10_major | 9.0% | 56.7 | 28.3 |
+| EURCHF | g10_major | 5.5% | 34.6 | 17.3 |
+| EURSEK | g10_minor | 7.0% | 44.1 | 22.0 |
+| EURNOK | g10_minor | 8.0% | 50.4 | 25.2 |
+| EURDKK | g10_minor | 0.3% | 1.9 | 0.9 |
+| EURAUD | g10_minor | 8.5% | 53.5 | 26.8 |
+| EURCAD | g10_minor | 7.0% | 44.1 | 22.0 |
+| EURPLN | cee | 5.0% | 31.5 | 15.7 |
+| EURCZK | cee | 4.5% | 28.3 | 14.2 |
+| EURHUF | cee | 9.0% | 56.7 | 28.3 |
+| EURZAR | em | 14.0% | 88.2 | 44.1 |
+| EURTRY | em | 16.0% | 100.8 | 50.4 |
+| EURMXN | em | 12.0% | 75.6 | 37.8 |
+
+"Sd of one day's noise" is `annual_vol / sqrt(252)` in basis points: the standard deviation of the random part of the mid over one full trading day. "Largest noise sd, mid-segment" is the standard deviation of the bridge noise at its widest point, halfway through the 540 steps (about 08:40 UTC on the morning after a fix). A Brownian bridge's spread at its midpoint is half of the one-day figure, and it is zero at both fixes. These numbers describe the random part only. The real move from one fix to the next is added on top by the linear term.
+
+Two things to know about the extremes. EURDKK is pegged inside the ERM II band, so the intraday noise is tiny by design (under 1 bp at its widest). EURTRY is a managed currency with a steady depreciation trend and occasional jumps: 16% describes the diffusion only. The trend itself and any jump are already in the ECB fixes the mid is pinned to, so they appear in the data without being modelled here.
+
+### 2.7 A caution for FX readers: the mid is pinned to the benchmark
+
+The ECB fix is the benchmark the later analysis uses (see [the benchmark note](benchmark-ecb.md)), and this stage pins the mid to that same number at 13:10 UTC. That is a property of the construction, and it affects how to read one kind of comparison:
+
+- **The mid-to-benchmark distance is small by construction around 13:10 UTC.** At the fix it is exactly zero. Thirty minutes either side the noise has a standard deviation of about 10 bps on EURUSD (a minute's worth is about 1.9 bps; the bridge scales with the square root of the minutes from the fix), and it grows towards the middle of each segment. In real markets the ECB fix comes from a procedure of its own, is rounded to a few significant figures and is not itself a traded price, so the live mid at 14:10 CET differs from it by a small amount that nothing pins. Here that difference is zero at 13:10 by construction.
+- **A trade-versus-benchmark gap is therefore a blend of two things here.** One is the markup the dealer charged. The other is how far the synthetic mid happened to be from the fix at that minute. For a trade close to the fix the second is tiny, so the gap looks like the markup. For a trade early in the day it can be large, and the sign is random. Over many trades the random part averages out, but a reader comparing one small group of trades against the benchmark should expect noise that comes from this stage, not from the dealer's pricing.
+- **The generator measures its own markups from the mid, not from the benchmark.** `markup_bps_applied` (see the pricing stage) is relative to the mid, and the benchmark rate is carried alongside it as a separate column. Where the analysis uses the benchmark, the mid-to-fix distance described above is part of what it is measuring.
+
+None of this says the ECB fix is a bad benchmark. It is a published reference, and the analysis is built on it for that reason. It says that in this dataset the mid and the benchmark are linked by design, which real desks do not see.
+
+### 2.8 What the market mid simplifies
+
+- **Intraday price behaviour is stylised.** A Brownian bridge has constant volatility, no jumps and no gaps. There is no news-driven spike, no wider spread around the open or close, no volatility clustering, and no difference between a quiet hour and a busy one.
+- **Variance is concentrated in the trading day.** All of a day's variance is spread across the 540 trading minutes and none is placed overnight, so the per-minute volatility is about 1.6 times what it would be if the same daily variance were spread over 24 hours. Intraday noise is a little rougher than a 24-hour spread would imply.
+- **Currencies are independent.** Each pair's path is drawn without reference to the others, so EURUSD and EURGBP can move in opposite directions on a day when, in reality, both would follow the dollar.
+- **One fixed fix time all year**, as covered in 2.5.
+- **The mid is a single price.** There is no bid and no ask here, so the spread a client pays is the markup applied to the mid in the pricing stage, with nothing in the market price standing for the touch.
+
+### 2.9 Reproducibility
+
+`simulate_mid_path` uses only the `numpy.random.Generator` it is given. It draws all of a pair's increments in one call, and always draws one fewer than the number of grid points, so the random stream it consumes depends on the grid alone and never on the pair's volatility. The same fixes, grid, volatility and generator state give an identical path.
