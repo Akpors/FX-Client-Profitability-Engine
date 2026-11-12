@@ -89,7 +89,7 @@
 **Interfaces:**
 - Produces:
   - Compose services: `db` (postgres 16, exact tag pinned), `pipeline` (builds `pipeline/`), `dbt` (builds `dbt/`). `app` and `notebook` are added in Plan 2 under compose profiles.
-  - Env vars: `FX_DB_HOST=db`, `FX_DB_NAME=fxengine`, `FX_DB_USER=fxengine`, `FX_DB_PASSWORD=fxengine_local`, `FX_DB_PORT`, `FX_APP_PORT`, `FX_NOTEBOOK_PORT`.
+  - Env vars: `FX_DB_HOST=db`, `FX_DB_NAME=fxengine`, `FX_DB_USER=fxengine`, `FX_DB_PASSWORD` (set in `.env`, never committed), `FX_DB_PORT`, `FX_APP_PORT`, `FX_NOTEBOOK_PORT`.
   - Make targets: `up`, `down`, `clean` (removes `fxengine_` volumes after a y/N prompt), `build`, `pipeline`, `dbt`, `dbt-debug`, `dbt-docs`, `test`, `test-slow`, `test-integration`, `lint`, `refresh-ecb`, `param-sheet`, `psql`.
   - `fxengine.cli.main(argv: list[str] | None = None) -> int` with argparse subcommands `fetch-ecb`, `generate`, `load`, `run-all`, `param-sheet`. They are stubs that return 0 until later tasks wire them up. `run-all` takes `--dry-run`.
 

@@ -7,7 +7,7 @@ x-fx-db-env: &fx-db-env
   FX_DB_PORT: "5432"
   FX_DB_NAME: ${FX_DB_NAME:-fxengine}
   FX_DB_USER: ${FX_DB_USER:-fxengine}
-  FX_DB_PASSWORD: ${FX_DB_PASSWORD:-fxengine_local}
+  FX_DB_PASSWORD: ${FX_DB_PASSWORD:?FX_DB_PASSWORD is not set - copy .env.example to .env and set it}
 
 services:
   db:
@@ -15,7 +15,7 @@ services:
     environment:
       POSTGRES_DB: ${FX_DB_NAME:-fxengine}
       POSTGRES_USER: ${FX_DB_USER:-fxengine}
-      POSTGRES_PASSWORD: ${FX_DB_PASSWORD:-fxengine_local}
+      POSTGRES_PASSWORD: ${FX_DB_PASSWORD:?FX_DB_PASSWORD is not set - copy .env.example to .env and set it}
     ports:
       - "127.0.0.1:${FX_DB_PORT:-5433}:5432"
     volumes:
