@@ -59,3 +59,13 @@ def small_cfg(full_cfg: GeneratorConfig) -> GeneratorConfig:
 @pytest.fixture(scope="session")
 def small_window() -> tuple[date, date]:
     return SMALL_WINDOW
+
+
+@pytest.fixture(scope="session")
+def small_raw_tables(
+    small_cfg: GeneratorConfig, ecb: pd.DataFrame, small_window: tuple[date, date]
+) -> dict[str, pd.DataFrame]:
+    """The seven raw tables for the small book, as ``run-all`` would assemble them."""
+    from fxengine.load import assemble_raw_tables
+
+    return assemble_raw_tables(small_cfg, ecb, small_window)

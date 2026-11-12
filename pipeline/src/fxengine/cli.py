@@ -1,18 +1,25 @@
 """Command-line entry point for the fxengine pipeline.
 
-Subcommands that are not built yet are stubs that return 0 until the task that implements them
-wires them up.
+``fetch-ecb`` and ``run-all`` are real. ``generate``, ``load`` and ``param-sheet`` are stubs that
+return 0 until the task that implements them wires them up (``run-all`` does what ``generate``
+and ``load`` would, in one go).
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+import time
 from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
 
+import psycopg
+import sqlalchemy.exc
+
 from fxengine import ecb
+from fxengine.config import DEFAULT_CONFIG_PATH, load_config
+from fxengine.load import LoadError, assemble_raw_tables, engine_from_env, write_raw
 
 
 def _stub(name: str):
@@ -48,6 +55,47 @@ def _fetch_ecb(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_all(args: argparse.Namespace) -> int:
+    """Config, snapshot, clients, trades, reference tables, then the raw load.
+
+    The window comes from the snapshot's file name, never from today's date, so the same config
+    and snapshot always give the same tables. ``--dry-run`` stops before the database.
+    """
+    started = time.perf_counter()
+    try:
+        snapshot = args.snapshot or ecb.latest_snapshot(ecb.DEFAULT_SNAPSHOT_DIR)
+        window = ecb.window_from_snapshot(snapshot)
+        cfg = load_config(args.config)
+        rates = ecb.read_snapshot(snapshot)
+        print(
+            f"fxengine run-all: config {args.config}, snapshot {Path(snapshot).name}, "
+            f"window {window[0]} to {window[1]}"
+        )
+        tables = assemble_raw_tables(cfg, rates, window)
+        generated = time.perf_counter()
+        print(f"fxengine run-all: generated {len(tables)} tables in {generated - started:.1f}s")
+        if args.dry_run:
+            counts = {name: len(frame) for name, frame in tables.items()}
+        else:
+            counts = write_raw(engine_from_env(), tables)
+            loaded = time.perf_counter() - generated
+            print(f"fxengine run-all: loaded into Postgres in {loaded:.1f}s")
+    except (OSError, ValueError, ecb.EcbError, LoadError) as exc:
+        # ValueError covers a bad config (pydantic's ValidationError) and a bad snapshot name.
+        print(f"fxengine run-all: error: {' '.join(str(exc).split())}", file=sys.stderr)
+        return 1
+    except (psycopg.Error, sqlalchemy.exc.SQLAlchemyError) as exc:
+        message = " ".join(str(getattr(exc, "orig", None) or exc).split())
+        print(f"fxengine run-all: database error: {message}", file=sys.stderr)
+        return 1
+
+    for name, count in counts.items():
+        print(f"  raw.{name:<18} {count:>9,} rows")
+    action = "dry run, nothing written to Postgres" if args.dry_run else "raw schema replaced"
+    print(f"fxengine run-all: {action} ({time.perf_counter() - started:.1f}s total)")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="fxengine",
@@ -80,11 +128,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     fetch.set_defaults(handler=_fetch_ecb)
 
-    run_all = sub.add_parser("run-all", help="Run generate and load from the committed snapshot")
-    run_all.add_argument(
-        "--dry-run", action="store_true", help="Validate inputs and stop before writing anything"
+    run_all = sub.add_parser(
+        "run-all", help="Generate every raw table from the ECB snapshot and load it into Postgres"
     )
-    run_all.set_defaults(handler=_stub("run-all"))
+    run_all.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_CONFIG_PATH,
+        help="Generator config (default: %(default)s)",
+    )
+    run_all.add_argument(
+        "--snapshot",
+        type=Path,
+        default=None,
+        help="ECB snapshot CSV; its file name sets the window "
+        "(default: the latest in the committed snapshot directory)",
+    )
+    run_all.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Generate everything and print the row counts, but do not touch Postgres",
+    )
+    run_all.set_defaults(handler=_run_all)
 
     return parser
 
