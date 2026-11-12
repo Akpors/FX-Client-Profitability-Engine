@@ -9,3 +9,23 @@ test-paths: ["tests"]
 macro-paths: ["macros"]
 
 clean-targets: ["target", "dbt_packages"]
+
+# Each layer lands in its own Postgres schema, named exactly (see macros/generate_schema_name.sql).
+# Staging is a thin view over raw; marts are tables that the Streamlit app reads.
+models:
+  fxengine:
+    staging:
+      +schema: staging
+      +materialized: view
+    intermediate:
+      +schema: intermediate
+      +materialized: view
+    marts:
+      +schema: marts
+      +materialized: table
+
+# dbt's own unit-test comparison is overridden in this project to round numeric columns to 4 dp
+# (macros/unit_test_rounding.sql), so search this project's macros before dbt's.
+dispatch:
+  - macro_namespace: dbt
+    search_order: ["fxengine", "dbt"]

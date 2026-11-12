@@ -1,0 +1,92 @@
+version: 2
+
+# Staging models rename and cast only. No business logic lives here.
+models:
+  - name: stg_ecb_rates
+    description: ECB euro reference rates. `ecb_rate` is units of `quote_ccy` per 1 EUR.
+    columns:
+      - name: rate_date
+        data_tests: [not_null]
+      - name: quote_ccy
+        data_tests: [not_null]
+      - name: ecb_rate
+        data_tests: [not_null]
+
+  - name: stg_clients
+    description: The synthetic client book, one row per client.
+    columns:
+      - name: client_id
+        data_tests: [unique, not_null]
+      - name: segment
+        description: Client segment; every segment must have a row in stg_cost_assumptions.
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('stg_cost_assumptions')
+              field: segment
+
+  - name: stg_trades
+    description: The synthetic spot trade book, one row per trade, as loaded.
+    columns:
+      - name: trade_id
+        data_tests: [unique, not_null]
+      - name: client_id
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('stg_clients')
+              field: client_id
+      - name: currency_pair
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('stg_pairs')
+              field: currency_pair
+      - name: client_side
+        data_tests:
+          - accepted_values:
+              values: ['BUY', 'SELL']
+      - name: notional_base
+        data_tests: [not_null]
+      - name: client_rate
+        data_tests: [not_null]
+      - name: cover_rate
+        data_tests: [not_null]
+      - name: mid_rate
+        data_tests: [not_null]
+      - name: benchmark_rate
+        data_tests: [not_null]
+
+  - name: stg_pairs
+    description: Currency-pair reference data.
+    columns:
+      - name: currency_pair
+        data_tests: [unique, not_null]
+      - name: settlement_weight
+        data_tests: [not_null]
+
+  - name: stg_ticket_bands
+    description: Ticket-size bands in EUR, [min, max). The top band has a NULL max.
+    columns:
+      - name: label
+        data_tests: [unique, not_null]
+      - name: min_ticket_eur
+        data_tests: [not_null]
+
+  - name: stg_cost_assumptions
+    description: Illustrative cost-to-serve assumptions by client segment.
+    columns:
+      - name: segment
+        data_tests: [unique, not_null]
+      - name: ops_cost_per_ticket_eur
+        data_tests: [not_null]
+      - name: credit_weight
+        data_tests: [not_null]
+
+  - name: stg_parameters
+    description: Named scalar parameters of the generator and the cost model.
+    columns:
+      - name: name
+        data_tests: [unique, not_null]
+      - name: value
+        data_tests: [not_null]

@@ -1,0 +1,223 @@
+version: 2
+
+models:
+  - name: int_trades_enriched
+    description: >
+      One row per trade: every column of the raw trade plus the economics the later marts
+      build on. Side sign, EUR notional, trade month, client segment, pair liquidity tier and
+      ticket band; dealer gross P&L in quote currency and EUR; gross margin and benchmark
+      spread in bps (positive means the dealer earned, or the client paid); cover slippage
+      against mid in bps (positive means worse for the dealer); per-ticket operations cost and
+      settlement-risk capital charge in EUR. Formulas are in docs/methodology/metrics.md.
+      Materialised as a table because every later model reads all of it.
+    columns:
+      - name: trade_id
+        description: Unique trade ID.
+        data_tests:
+          - unique
+          - not_null
+      - name: client_side
+        description: BUY or SELL, from the client's side, of the base currency (EUR).
+        data_tests:
+          - accepted_values:
+              values: ['BUY', 'SELL']
+      - name: side_sign
+        description: +1 when the client buys EUR, -1 when the client sells EUR.
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: [1, -1]
+      - name: segment
+        description: Client segment, joined from the client book.
+        data_tests:
+          - not_null
+      - name: liquidity_tier
+        description: Pair liquidity tier, joined from the pair reference.
+        data_tests:
+          - not_null
+      - name: ticket_band
+        description: Label of the ticket band holding the notional; bands are [min, max).
+        data_tests:
+          - not_null
+      - name: gross_pnl_eur
+        description: Dealer gross P&L converted to EUR at the same-day ECB fix.
+        data_tests:
+          - not_null
+      - name: ops_cost_eur
+        description: Per-ticket operations cost of the client's segment, in EUR.
+        data_tests:
+          - not_null
+      - name: capital_charge_eur
+        description: Settlement-risk capital charge in EUR (a missing capital_charge_bps parameter shows up here as NULL).
+        data_tests:
+          - not_null
+
+unit_tests:
+  # A client BUY of EUR. The dealer sells EUR to the client at 1.1010 and buys it back in the
+  # market at 1.1000, earning 0.0010 USD per EUR, or 1,000 USD on EUR 1m, which is 909.09 EUR
+  # at the 1.1000 ECB fix. Cover was 1 pip above mid (1.0999), so slippage is positive: worse
+  # for the dealer. All numeric comparisons are rounded to 4 dp (see macros/unit_test_rounding.sql).
+  - name: int_trades_enriched_client_buy_economics
+    model: int_trades_enriched
+    given:
+      - input: ref('stg_trades')
+        format: dict
+        rows:
+          - {trade_id: T-BUY, client_id: C-1, trade_date: '2025-03-14', currency_pair: EURUSD, client_side: BUY, notional_base: 1000000, client_rate: 1.1010, cover_rate: 1.1000, mid_rate: 1.0999, benchmark_rate: 1.1000}
+      - input: ref('stg_clients')
+        format: dict
+        rows:
+          - {client_id: C-1, segment: mid_market}
+      - input: ref('stg_pairs')
+        format: dict
+        rows:
+          - {currency_pair: EURUSD, liquidity_tier: g10_major, settlement_weight: 1.0}
+      - input: ref('stg_ticket_bands')
+        format: dict
+        rows:
+          - {label: 100k-500k, min_ticket_eur: 100000, max_ticket_eur: 500000}
+          - {label: 500k-2m, min_ticket_eur: 500000, max_ticket_eur: 2000000}
+          - {label: 2m-10m, min_ticket_eur: 2000000, max_ticket_eur: 10000000}
+      - input: ref('stg_cost_assumptions')
+        format: dict
+        rows:
+          - {segment: mid_market, ops_cost_per_ticket_eur: 12.0, credit_weight: 1.0}
+      - input: ref('stg_parameters')
+        format: dict
+        rows:
+          - {name: capital_charge_bps, value: 0.05}
+    expect:
+      format: dict
+      rows:
+        - trade_id: T-BUY
+          side_sign: 1
+          notional_eur: 1000000
+          trade_month: '2025-03-01'
+          segment: mid_market
+          liquidity_tier: g10_major
+          ticket_band: 500k-2m
+          gross_pnl_quote: 1000.0000
+          gross_pnl_eur: 909.0909
+          gross_margin_bps: 9.0909
+          benchmark_spread_bps: 9.0909
+          cover_slippage_bps: 0.9092
+          ops_cost_eur: 12.0
+          capital_charge_eur: 5.0
+
+  # A client SELL of EUR. The dealer buys EUR from the client at 1.0990 and sells it in the
+  # market at 1.1000: the same 1,000 USD, with the sign flipped inside the formula. Cover was
+  # 1 pip below mid (1.1001), which is again worse for the dealer, so slippage is positive.
+  - name: int_trades_enriched_client_sell_economics
+    model: int_trades_enriched
+    given:
+      - input: ref('stg_trades')
+        format: dict
+        rows:
+          - {trade_id: T-SELL, client_id: C-1, trade_date: '2025-03-14', currency_pair: EURUSD, client_side: SELL, notional_base: 1000000, client_rate: 1.0990, cover_rate: 1.1000, mid_rate: 1.1001, benchmark_rate: 1.1000}
+      - input: ref('stg_clients')
+        format: dict
+        rows:
+          - {client_id: C-1, segment: mid_market}
+      - input: ref('stg_pairs')
+        format: dict
+        rows:
+          - {currency_pair: EURUSD, liquidity_tier: g10_major, settlement_weight: 1.0}
+      - input: ref('stg_ticket_bands')
+        format: dict
+        rows:
+          - {label: 500k-2m, min_ticket_eur: 500000, max_ticket_eur: 2000000}
+      - input: ref('stg_cost_assumptions')
+        format: dict
+        rows:
+          - {segment: mid_market, ops_cost_per_ticket_eur: 12.0, credit_weight: 1.0}
+      - input: ref('stg_parameters')
+        format: dict
+        rows:
+          - {name: capital_charge_bps, value: 0.05}
+    expect:
+      format: dict
+      rows:
+        - trade_id: T-SELL
+          side_sign: -1
+          gross_pnl_quote: 1000.0000
+          gross_pnl_eur: 909.0909
+          gross_margin_bps: 9.0909
+          benchmark_spread_bps: 9.0909
+          cover_slippage_bps: 0.9090
+
+  # Capital charge = notional x capital_charge_bps / 10,000 x credit weight x settlement weight.
+  # EUR 2m x 0.05 / 10,000 = EUR 10, then x 1.0 x 2.5 for a pair that does not settle in CLS.
+  - name: int_trades_enriched_capital_charge_uses_settlement_weight
+    model: int_trades_enriched
+    given:
+      - input: ref('stg_trades')
+        format: dict
+        rows:
+          - {trade_id: T-TRY, client_id: C-1, trade_date: '2025-03-14', currency_pair: EURTRY, client_side: BUY, notional_base: 2000000, client_rate: 35.50, cover_rate: 35.40, mid_rate: 35.45, benchmark_rate: 35.40}
+      - input: ref('stg_clients')
+        format: dict
+        rows:
+          - {client_id: C-1, segment: mid_market}
+      - input: ref('stg_pairs')
+        format: dict
+        rows:
+          - {currency_pair: EURTRY, liquidity_tier: em, settlement_weight: 2.5}
+      - input: ref('stg_ticket_bands')
+        format: dict
+        rows:
+          - {label: 500k-2m, min_ticket_eur: 500000, max_ticket_eur: 2000000}
+          - {label: 2m-10m, min_ticket_eur: 2000000, max_ticket_eur: 10000000}
+      - input: ref('stg_cost_assumptions')
+        format: dict
+        rows:
+          - {segment: mid_market, ops_cost_per_ticket_eur: 12.0, credit_weight: 1.0}
+      - input: ref('stg_parameters')
+        format: dict
+        rows:
+          - {name: capital_charge_bps, value: 0.05}
+    expect:
+      format: dict
+      rows:
+        - trade_id: T-TRY
+          capital_charge_eur: 25.00
+
+  # Ticket bands are [min, max): a notional on a boundary belongs to the band that starts there.
+  - name: int_trades_enriched_ticket_band_boundaries
+    model: int_trades_enriched
+    given:
+      - input: ref('stg_trades')
+        format: dict
+        rows:
+          - {trade_id: T-1, client_id: C-1, currency_pair: EURUSD, notional_base: 24999.99}
+          - {trade_id: T-2, client_id: C-1, currency_pair: EURUSD, notional_base: 25000.00}
+          - {trade_id: T-3, client_id: C-1, currency_pair: EURUSD, notional_base: 99999.99}
+          - {trade_id: T-4, client_id: C-1, currency_pair: EURUSD, notional_base: 100000.00}
+      - input: ref('stg_clients')
+        format: dict
+        rows:
+          - {client_id: C-1, segment: mid_market}
+      - input: ref('stg_pairs')
+        format: dict
+        rows:
+          - {currency_pair: EURUSD, liquidity_tier: g10_major, settlement_weight: 1.0}
+      - input: ref('stg_ticket_bands')
+        format: dict
+        rows:
+          - {label: Under 25k, min_ticket_eur: 0, max_ticket_eur: 25000}
+          - {label: 25k-100k, min_ticket_eur: 25000, max_ticket_eur: 100000}
+          - {label: 100k+, min_ticket_eur: 100000, max_ticket_eur: null}
+      - input: ref('stg_cost_assumptions')
+        format: dict
+        rows:
+          - {segment: mid_market, ops_cost_per_ticket_eur: 12.0, credit_weight: 1.0}
+      - input: ref('stg_parameters')
+        format: dict
+        rows:
+          - {name: capital_charge_bps, value: 0.05}
+    expect:
+      format: dict
+      rows:
+        - {trade_id: T-1, ticket_band: Under 25k}
+        - {trade_id: T-2, ticket_band: 25k-100k}
+        - {trade_id: T-3, ticket_band: 25k-100k}
+        - {trade_id: T-4, ticket_band: 100k+}
