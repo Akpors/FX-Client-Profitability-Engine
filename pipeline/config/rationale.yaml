@@ -21,6 +21,7 @@
 #   ticket_band.multiplier     markup_multiplier of each band
 #   volume_tier.threshold      min_annual_volume_eur of each tier
 #   volume_tier.discount       discount_pct of each tier
+#   cover_half_spread          cover_half_spread_bps (all four liquidity tiers, one row)
 #   settlement_weight.cls      cost.settlement_weight_cls
 #   settlement_weight.non_cls  cost.settlement_weight_non_cls
 #   capital_charge_bps         cost.capital_charge_bps
@@ -28,9 +29,10 @@
 #   legacy_deal.probability    legacy_deal.probability
 #   legacy_deal.discount_pct   legacy_deal.discount_pct
 #
-# Limits: a grid reason prints as "- **Label:** text" and must stay within 110 characters; a
-# Why in the capital table must stay within about 85. test_sheet_fits_one_page_70_lines_8_columns_
-# 110_chars fails the build if the sheet outgrows them.
+# Limits: a grid reason prints as "- **Label:** text" and must stay within 110 characters; a row
+# of the cover and capital table (label, default, blank and Why) must stay within 130, which
+# leaves the Why about 60 to 85 characters depending on the label.
+# test_sheet_fits_one_page_70_lines_8_columns_110_chars fails the build if the sheet outgrows them.
 
 # --- Segment grid -------------------------------------------------------------------------------
 markup: "Wider as liquidity thins (cover cost, inventory risk); hedge funds tightest, SMEs widest"
@@ -47,10 +49,11 @@ ticket_band.multiplier: "Bigger tickets are cheaper to handle and shopped harder
 volume_tier.threshold: "Spaced so each step is a clearly bigger relationship, small client to top flow"
 volume_tier.discount: "Bigger relationships negotiate harder and rivals bid for them, so discounts rise"
 
-# --- Capital, hurdle and legacy deals -----------------------------------------------------------
+# --- Cover, capital, hurdle and legacy deals ----------------------------------------------------
+cover_half_spread: "Crossing the interbank touch to cover; wider in thin pairs"
 settlement_weight.cls: "Payment-versus-payment through CLS removes principal risk: the baseline"
 settlement_weight.non_cls: "Bilateral settlement leaves principal at risk: a higher weight"
-capital_charge_bps: "Fully risk-weighted exposure costs about 0.5 bps; CLS flow keeps roughly a fifth"
-hurdle_rate_bps: "Judgement call: below it, volume does not pay for its own costs and capital"
+capital_charge_bps: "Internal settlement-risk and credit-line charge, not regulatory capital"
+hurdle_rate_bps: "Illustrative builder default, chosen before any trades; owner sets it independently"
 legacy_deal.probability: "Old discounts are rarely repriced, so some clients onboarded earlier still hold one"
 legacy_deal.discount_pct: "A concession from winning the mandate years ago, stacking on the volume tier"

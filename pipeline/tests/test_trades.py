@@ -154,15 +154,20 @@ def test_markup_orderings(full_cfg: GeneratorConfig, small_window, ecb):
     assert by_pair["EURTRY"] > by_pair["EURUSD"], by_pair
 
 
+def _flat_cover(cfg: GeneratorConfig, slippage_bps: float, half_spread: dict[str, float]):
+    """``cfg`` with a fixed slippage (sd 0) for every segment and the given cover half-spreads."""
+    segments = {
+        name: seg.model_copy(update={"adverse_selection_bps": (slippage_bps, 0.0)})
+        for name, seg in cfg.segments.items()
+    }
+    return cfg.model_copy(update={"segments": segments, "cover_half_spread_bps": half_spread})
+
+
 def test_cover_slippage_sign_convention(small_cfg: GeneratorConfig, small_window, ecb):
     """Positive slippage is worse for the dealer on either side: with a fixed 2 bps of adverse
-    selection, a BUY is covered 2 bps above mid and a SELL 2 bps below, and dealer gross P&L in
-    bps is the markup minus those 2 bps."""
-    segments = {
-        name: seg.model_copy(update={"adverse_selection_bps": (2.0, 0.0)})
-        for name, seg in small_cfg.segments.items()
-    }
-    cfg = small_cfg.model_copy(update={"segments": segments})
+    selection and no half-spread, a BUY is covered 2 bps above mid and a SELL 2 bps below, and
+    dealer gross P&L in bps is the markup minus those 2 bps."""
+    cfg = _flat_cover(small_cfg, 2.0, {tier: 0.0 for tier in small_cfg.cover_half_spread_bps})
     _, trades = _book(cfg, small_window, ecb)
     sign = np.where(trades["client_side"] == "BUY", 1.0, -1.0)
     mid = trades["mid_rate"].to_numpy()
@@ -173,6 +178,45 @@ def test_cover_slippage_sign_convention(small_cfg: GeneratorConfig, small_window
     gross_bps = sign * (trades["client_rate"] - trades["cover_rate"]).to_numpy() / mid * 1e4
     expected = trades["markup_bps_applied"].to_numpy() - 2.0
     assert (np.abs(gross_bps - expected) <= 2 * tick_bps).all()
+
+
+def test_cover_rate_includes_the_tier_half_spread_on_both_sides(
+    small_cfg: GeneratorConfig, small_window, ecb
+):
+    """The dealer crosses the interbank bid/offer to cover: a BUY is covered the pair's tier
+    half-spread above mid (it buys EUR at the offer) and a SELL the same distance below (it sells
+    at the bid), on top of the slippage. Each tier has its own half-spread here so a wrong lookup
+    shows."""
+    half_spread = {"g10_major": 1.0, "g10_minor": 3.0, "cee": 6.0, "em": 10.0}
+    cfg = _flat_cover(small_cfg, 0.5, half_spread)
+    _, trades = _book(cfg, small_window, ecb)
+    sign = np.where(trades["client_side"] == "BUY", 1.0, -1.0)
+    mid = trades["mid_rate"].to_numpy()
+    tick_bps = _tick(cfg, trades["currency_pair"]) / mid * 1e4 * 1.01
+    tier = trades["currency_pair"].map(lambda p: cfg.pairs[p].liquidity_tier)
+    expected_cost = 0.5 + tier.map(half_spread).to_numpy()
+    cost = sign * (trades["cover_rate"].to_numpy() / mid - 1) * 1e4
+    buy = sign > 0
+    assert buy.any() and (~buy).any()
+    assert set(tier) == set(half_spread)
+    assert (np.abs(cost[buy] - expected_cost[buy]) <= tick_bps[buy]).all()
+    assert (np.abs(cost[~buy] - expected_cost[~buy]) <= tick_bps[~buy]).all()
+    # In rate terms: above mid on a BUY, below on a SELL.
+    assert (trades["cover_rate"].to_numpy()[buy] > mid[buy]).all()
+    assert (trades["cover_rate"].to_numpy()[~buy] < mid[~buy]).all()
+    gross_bps = sign * (trades["client_rate"] - trades["cover_rate"]).to_numpy() / mid * 1e4
+    expected_gross = trades["markup_bps_applied"].to_numpy() - expected_cost
+    assert (np.abs(gross_bps - expected_gross) <= 2 * tick_bps).all()
+
+
+def test_half_spread_adds_no_random_draws(small_cfg: GeneratorConfig, small_window, ecb):
+    """The half-spread is deterministic: changing it moves cover_rate and nothing else."""
+    zero = {tier: 0.0 for tier in small_cfg.cover_half_spread_bps}
+    _, base = _book(small_cfg.model_copy(update={"cover_half_spread_bps": zero}), small_window, ecb)
+    _, wide = _book(small_cfg, small_window, ecb)
+    others = [column for column in COLUMNS if column != "cover_rate"]
+    pd.testing.assert_frame_equal(base[others], wide[others], check_exact=True)
+    assert not base["cover_rate"].equals(wide["cover_rate"])
 
 
 def test_markup_formula_without_noise(small_cfg: GeneratorConfig, small_window, ecb):
@@ -204,11 +248,15 @@ def test_markup_formula_without_noise(small_cfg: GeneratorConfig, small_window, 
 
 
 def test_ticket_band_edges_are_half_open(full_cfg: GeneratorConfig):
-    notional = np.array([1_000, 24_000, 25_000, 99_000, 100_000, 500_000, 9_999_000, 10_000_000])
-    np.testing.assert_allclose(
-        ticket_band_multiplier(full_cfg, notional),
-        [1.80, 1.80, 1.35, 1.35, 1.00, 0.80, 0.65, 0.55],
-    )
+    # Read off the configured bands, so an owner's new edges or multipliers do not break it:
+    # EUR 1,000 below an edge is in the band below it, exactly at the edge is in the next one.
+    bands = full_cfg.ticket_bands
+    notional, expected = [], []
+    for i, band in enumerate(bands[:-1]):
+        notional += [band.max_ticket_eur - 1_000, band.max_ticket_eur]
+        expected += [band.markup_multiplier, bands[i + 1].markup_multiplier]
+    np.testing.assert_allclose(ticket_band_multiplier(full_cfg, np.array(notional)), expected)
+    assert ticket_band_multiplier(full_cfg, np.array([1_000]))[0] == bands[0].markup_multiplier
 
 
 def test_reproducible_trades(small_cfg: GeneratorConfig, small_window, ecb, trades):
@@ -260,6 +308,70 @@ def test_volume_discount_visible(full_cfg, full_window, full_book):
     )
     print(f"\nSpearman overall {rho:.3f}; within segment {within.round(3).to_dict()}")
     assert rho < -0.3, rho
+
+
+def _volume_markup_by_client(cfg, trades, clients, window) -> pd.DataFrame:
+    frame = pd.DataFrame(
+        {
+            "volume": _realised_annual_volume(trades, clients, window),
+            "markup": _client_g10_major_markup(cfg, trades),
+        }
+    ).dropna()
+    frame["segment"] = clients.set_index("client_id").loc[frame.index, "segment"]
+    return frame
+
+
+def _pooled_within_segment_spearman(frame: pd.DataFrame) -> float:
+    """Spearman with the segment ladder taken out: rank volume and markup within each segment
+    (as percentiles, so a 16-client segment counts on the same scale as a 64-client one), centre
+    each segment's ranks on zero, then correlate the pooled ranks. Pearson on ranks is Spearman,
+    without scipy."""
+    by = frame["segment"]
+    centred = {}
+    for column in ("volume", "markup"):
+        ranks = frame.groupby(by)[column].rank(pct=True)
+        centred[column] = ranks - ranks.groupby(by).transform("mean")
+    return centred["volume"].corr(centred["markup"])
+
+
+# The pooled within-segment correlation at seed 42 is -0.29 with the shipped grid and -0.03 with
+# the volume tiers and ticket bands switched off (seeds 42 to 61 give -0.26 to -0.47 shipped).
+# -0.15 sits between the two with a margin either side, so the test fails if the grid stops
+# making a segment's bigger clients cheaper, whatever the segment ladder does.
+POOLED_WITHIN_SEGMENT_MAX = -0.15
+
+
+@pytest.mark.slow
+def test_volume_discount_holds_within_segments(full_cfg, full_window, full_book):
+    """The book-wide test above passes on the segment ladder alone (-0.87 with tiers and bands
+    off). This one takes the ladder out, so only the grid can pass it."""
+    clients, trades, _ = full_book
+    frame = _volume_markup_by_client(full_cfg, trades, clients, full_window)
+    pooled = _pooled_within_segment_spearman(frame)
+    print(f"\npooled within-segment Spearman {pooled:.3f}")
+    assert pooled < POOLED_WITHIN_SEGMENT_MAX, pooled
+
+
+@pytest.mark.slow
+def test_pooled_within_segment_check_fails_without_the_grid(full_cfg, full_window, ecb):
+    """The same statistic with the volume tiers and ticket bands switched off stays near zero,
+    so the check above really does depend on the grid."""
+    flat = full_cfg.model_copy(
+        update={
+            "ticket_bands": [
+                b.model_copy(update={"markup_multiplier": 1.0}) for b in full_cfg.ticket_bands
+            ],
+            "volume_tiers": [
+                t.model_copy(update={"discount_pct": 0.0}) for t in full_cfg.volume_tiers
+            ],
+        }
+    )
+    clients, trades = _book(flat, full_window, ecb)
+    pooled = _pooled_within_segment_spearman(
+        _volume_markup_by_client(flat, trades, clients, full_window)
+    )
+    print(f"\npooled within-segment Spearman, tiers and bands off {pooled:.3f}")
+    assert pooled > POOLED_WITHIN_SEGMENT_MAX, pooled
 
 
 @pytest.mark.slow

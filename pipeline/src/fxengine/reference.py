@@ -15,7 +15,8 @@ How dbt uses them:
   max_ticket_eur``. The top band has a null ``max_ticket_eur`` (no upper limit).
 * ``cost_assumptions``: ops cost per ticket, monthly coverage cost and ``credit_weight`` per
   segment.
-* ``parameters``: global scalars, read by ``name``. Capital charge per trade is
+* ``parameters``: global scalars, read by ``name``. Capital charge per trade (an internal
+  settlement-risk and credit-line charge, not regulatory capital) is
   ``notional x capital_charge_bps / 10,000 x credit_weight x settlement_weight``.
 """
 
@@ -146,7 +147,8 @@ def parameters_table(cfg: GeneratorConfig) -> pd.DataFrame:
         (
             "capital_charge_bps",
             cost.capital_charge_bps,
-            "Capital charge in bps of notional at credit weight 1.0 and settlement weight 1.0",
+            "Internal settlement-risk and credit-line charge (not regulatory capital), bps of "
+            "notional at credit weight 1.0 and settlement weight 1.0",
         ),
         (
             "settlement_weight_cls",

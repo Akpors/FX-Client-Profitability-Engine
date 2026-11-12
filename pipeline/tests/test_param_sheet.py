@@ -43,6 +43,7 @@ SEGMENT_ROWS = {
     "Negotiation sigma (client price scatter)": "client_markup_sigma",
 }
 ADVERSE_ROW = "Adverse selection mean/sd (bps)"
+HALF_SPREAD_ROW = "Cover half-spread, major/minor/CEE/EM (bps)"
 SEGMENT_GRID = "Segment parameter"
 
 # Every rationale key and the start of the row (a bullet under a grid, or a table row) that must
@@ -59,6 +60,7 @@ ROW_ANCHORS = {
     "ticket_band.multiplier": "- **Band multipliers:** ",
     "volume_tier.threshold": "- **Tier thresholds:** ",
     "volume_tier.discount": "- **Tier discounts:** ",
+    "cover_half_spread": f"| {HALF_SPREAD_ROW} |",
     "settlement_weight.cls": "| Settlement weight, CLS |",
     "settlement_weight.non_cls": "| Settlement weight, non-CLS (",
     "capital_charge_bps": "| Capital charge (bps) |",
@@ -195,6 +197,7 @@ def test_sheet_contains_every_segment_and_tier(sheet: str, cfg: GeneratorConfig)
     assert [r[0] for r in tiers[1:] if r[0]] == ["Annual volume from (EUR)", "Discount off markup"]
 
     assert [r[0] for r in table(sheet, "Parameter")[1:]] == [
+        HALF_SPREAD_ROW,
         "Capital charge (bps)",
         "Settlement weight, CLS",
         non_cls_label(cfg),
@@ -255,6 +258,12 @@ def test_sheet_values_match_config(sheet: str, cfg: GeneratorConfig):
         discount = grid_row(sheet, "Volume tier", "Discount off markup")[f"Tier {i}"]
         assert percent(discount) == pytest.approx(tier.discount_pct), i
 
+    # One cell, four tiers in the order the label names them.
+    shown = cell(sheet, "Parameter", HALF_SPREAD_ROW, "Default").split("/")
+    assert [number(part) for part in shown] == [
+        cfg.cover_half_spread_bps[tier] for tier in TIER_LABELS
+    ]
+
     cost, legacy = cfg.cost, cfg.legacy_deal
     plain = {
         "Capital charge (bps)": cost.capital_charge_bps,
@@ -274,6 +283,7 @@ def test_sheet_reads_the_config_it_is_given(cfg: GeneratorConfig, rationale: dic
     hedge_fund = cfg.segments["hedge_fund"]
     changed = cfg.model_copy(
         update={
+            "cover_half_spread_bps": {**cfg.cover_half_spread_bps, "em": 3.75},
             "segments": {
                 **cfg.segments,
                 "hedge_fund": hedge_fund.model_copy(
@@ -297,9 +307,11 @@ def test_sheet_reads_the_config_it_is_given(cfg: GeneratorConfig, rationale: dic
     sigma = grid_row(sheet, SEGMENT_GRID, "Negotiation sigma (client price scatter)")
     assert number(sigma["Hedge fund"]) == 0.45
     assert size(grid_row(sheet, "Ticket band", "Upper edge (EUR)")["Under 25k"]) == 30_000
+    half_spread = cell(sheet, "Parameter", HALF_SPREAD_ROW, "Default").split("/")
+    assert number(half_spread[-1]) == 3.75
     # Nothing else moved.
     cee = grid_row(sheet, SEGMENT_GRID, markup_label(changed, "cee"))
-    assert number(cee["Hedge fund"]) == 3.5
+    assert number(cee["Hedge fund"]) == hedge_fund.base_markup_bps["cee"]
 
 
 def test_every_your_value_cell_is_blank(sheet: str):
@@ -320,9 +332,9 @@ def test_every_your_value_cell_is_blank(sheet: str):
             column = header.index("Your value")
             assert all(r[column] == "" for r in rows[1:]), header[0]
             slots += len(rows) - 1
-    # Segment, band and tier grids, plus the capital table's Your value column.
+    # Segment, band and tier grids, plus the cover and capital table's Your value column.
     assert grids == 3
-    assert slots == 10 * 6 + 2 * 6 + 2 * 6 + 6
+    assert slots == 10 * 6 + 2 * 6 + 2 * 6 + 7
 
 
 # --- the reason on every line -----------------------------------------------------------------
@@ -381,14 +393,11 @@ def test_why_text_is_one_line_and_pipes_are_escaped(
 
 
 def test_rationale_holds_no_figures_that_could_go_stale(rationale: dict[str, str]):
-    """Lines name roles, not numbers; the two exceptions are a convention and a stated bridge."""
-    allowed = {"credit_weight", "capital_charge_bps"}
+    """Lines name roles, not numbers; the one exception is the credit-weight convention."""
+    allowed = {"credit_weight"}
     for key, text in rationale.items():
         if key not in allowed:
             assert not re.search(r"\d", text), f"{key}: {text!r}"
-    # The capital charge default (0.10) is explained by the full-weight figure and the CLS share.
-    assert "0.5" in rationale["capital_charge_bps"]
-    assert "fifth" in rationale["capital_charge_bps"]
 
 
 # --- determinism and size ---------------------------------------------------------------------

@@ -55,13 +55,14 @@ Compression: markup x e^(-rate x years). Adverse selection: cover vs mid, + hurt
 - **Band multipliers:** Bigger tickets are cheaper to handle and shopped harder, so bands price tighter
 - **Tier thresholds:** Spaced so each step is a clearly bigger relationship, small client to top flow
 - **Tier discounts:** Bigger relationships negotiate harder and rivals bid for them, so discounts rise
-## 3. Capital, hurdle and legacy deals
+## 3. Cover, capital, hurdle and legacy deals
 | Parameter | Default | Your value | Why |
 | --- | --- | --- | --- |
-| Capital charge (bps) | 0.10 |  | Fully risk-weighted exposure costs about 0.5 bps; CLS flow keeps roughly a fifth |
+| Cover half-spread, major/minor/CEE/EM (bps) | 0.1/0.4/1.0/2.5 |  | Crossing the interbank touch to cover; wider in thin pairs |
+| Capital charge (bps) | 0.10 |  | Internal settlement-risk and credit-line charge, not regulatory capital |
 | Settlement weight, CLS | 1.0 |  | Payment-versus-payment through CLS removes principal risk: the baseline |
 | Settlement weight, non-CLS (PLN CZK TRY) | 2.5 |  | Bilateral settlement leaves principal at risk: a higher weight |
-| Hurdle rate (bps of volume) | 0.75 |  | Judgement call: below it, volume does not pay for its own costs and capital |
+| Hurdle rate (bps of volume) | 0.75 |  | Illustrative builder default, chosen before any trades; owner sets it independently |
 | Legacy deal probability | 20% |  | Old discounts are rarely repriced, so some clients onboarded earlier still hold one |
 | Legacy deal discount | 25% |  | A concession from winning the mandate years ago, stacking on the volume tier |
 

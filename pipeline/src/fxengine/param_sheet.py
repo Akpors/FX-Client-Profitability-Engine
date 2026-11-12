@@ -103,7 +103,7 @@ def render_parameter_sheet(cfg: GeneratorConfig, rationale: Mapping[str, str]) -
         _header(),
         _segment_parameters(cfg, why),
         _bands_and_tiers(cfg, why),
-        _cost_and_hurdle(cfg, why),
+        _cover_cost_and_hurdle(cfg, why),
         _footer(),
     ):
         lines.extend(section)
@@ -273,10 +273,15 @@ def _bands_and_tiers(cfg: GeneratorConfig, why: Why) -> list[str]:
     ]
 
 
-def _cost_and_hurdle(cfg: GeneratorConfig, why: Why) -> list[str]:
+def _cover_cost_and_hurdle(cfg: GeneratorConfig, why: Why) -> list[str]:
     cost, legacy = cfg.cost, cfg.legacy_deal
     non_cls = _pairs_where(cfg, lambda pair: not pair.cls_settled)
+    # The four tier half-spreads share one row (and one Your value cell), in the order the label
+    # names them, so the table stays within the one-page line budget.
+    tiers = "/".join(TIER_LABELS[tier] for tier in LIQUIDITY_TIERS)
+    half_spreads = "/".join(_num(cfg.cover_half_spread_bps[tier], 1) for tier in LIQUIDITY_TIERS)
     rows = [
+        (f"Cover half-spread, {tiers} (bps)", half_spreads, "cover_half_spread"),
         ("Capital charge (bps)", _num(cost.capital_charge_bps, 2), "capital_charge_bps"),
         (
             "Settlement weight, CLS",
@@ -293,7 +298,7 @@ def _cost_and_hurdle(cfg: GeneratorConfig, why: Why) -> list[str]:
         ("Legacy deal discount", _pct(legacy.discount_pct), "legacy_deal.discount_pct"),
     ]
     return [
-        "## 3. Capital, hurdle and legacy deals",
+        "## 3. Cover, capital, hurdle and legacy deals",
         *_table(
             ["Parameter", "Default", "Your value", "Why"],
             [[label, default, "", why(key)] for label, default, key in rows],

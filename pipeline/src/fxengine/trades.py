@@ -19,11 +19,16 @@ Markup, in basis points of mid, one-sided::
 Rates, with ``side_sign`` = +1 when the client BUYS EUR and -1 when it SELLS EUR::
 
     client_rate = mid x (1 + side_sign x markup_bps / 1e4)
-    cover_rate  = mid x (1 + side_sign x slippage_bps / 1e4),  slippage ~ Normal(mean, sd)
+    cover_rate  = mid x (1 + side_sign x (slippage_bps + half_spread_bps) / 1e4)
+                  slippage ~ Normal(mean, sd) by segment
+                  half_spread_bps = cover_half_spread_bps[liquidity_tier(pair)], deterministic
 
-Positive slippage is worse for the dealer on either side, so dealer gross P&L in bps of mid is
-``markup_bps - slippage_bps`` before rounding. See ``docs/methodology/data-generation.md``
-(section 3).
+The dealer covers at the interbank offer when it has sold EUR to the client and at the bid when
+it has bought EUR, so it pays half the interbank bid/offer on every cover, on top of the
+slippage. Both are positive when worse for the dealer on either side, so dealer gross P&L in bps
+of mid is ``markup_bps - slippage_bps - half_spread_bps`` before rounding. The half-spread is a
+lookup, not a draw, so it leaves the random stream untouched. See
+``docs/methodology/data-generation.md`` (section 3).
 
 Random draws, in this fixed order, all from the one generator passed in:
 
@@ -229,6 +234,7 @@ def generate_trades(
         by_segment(lambda s: s.adverse_selection_bps[0])
         + by_segment(lambda s: s.adverse_selection_bps[1]) * slippage_z
     )
+    half_spread_bps = np.array([cfg.cover_half_spread_bps[t] for t in tiers])[pair_idx]
 
     # Market data: the mid at each trade and the day's ECB fix.
     ts_index = pd.DatetimeIndex(trade_ts).tz_localize("UTC")
@@ -248,7 +254,8 @@ def generate_trades(
 
     decimals = np.array([cfg.pairs[pair].price_decimals for pair in pairs])[pair_idx]
     client_rate = _round_to_decimals(mid * (1.0 + side_sign * markup_bps / 1e4), decimals)
-    cover_rate = _round_to_decimals(mid * (1.0 + side_sign * slippage_bps / 1e4), decimals)
+    cover_cost_bps = slippage_bps + half_spread_bps
+    cover_rate = _round_to_decimals(mid * (1.0 + side_sign * cover_cost_bps / 1e4), decimals)
 
     # Deterministic order: time, then client_id, then draw order.
     client_ids = clients["client_id"].to_numpy(dtype=object)

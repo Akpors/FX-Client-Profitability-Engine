@@ -8,7 +8,8 @@ it. Unknown keys are rejected everywhere so a typo never silently falls back to 
 Conventions used throughout the file:
 
 * ``*_bps`` values are basis points (1 bp = 0.01%). Markups are one-sided, measured from the
-  market mid to the client's rate.
+  market mid to the client's rate. ``cover_half_spread_bps`` is one-sided too: half the interbank
+  bid/offer the dealer crosses when it covers, by the pair's liquidity tier.
 * ``discount_pct`` values are fractions in [0, 1), so 0.25 means a 25% discount.
 * ``trades_per_month_lognorm`` and ``ticket_eur_lognorm`` are ``(mu, sigma)`` of the underlying
   normal distribution, not the mean and standard deviation of the lognormal itself.
@@ -115,7 +116,9 @@ class LegacyDeal(_Model):
 class GlobalCost(_Model):
     """Cost-to-serve assumptions that do not vary by segment."""
 
-    capital_charge_bps: NonNegative  # per unit of credit weight x settlement weight
+    # Internal settlement-risk and credit-line charge (not regulatory capital), in bps of
+    # notional per unit of credit weight x settlement weight.
+    capital_charge_bps: NonNegative
     settlement_weight_cls: NonNegative
     settlement_weight_non_cls: NonNegative
     hurdle_rate_bps: NonNegative  # minimum acceptable economic margin
@@ -151,6 +154,8 @@ class GeneratorConfig(_Model):
     fix_time_utc: time = time(13, 10)
     client_book: ClientBookConfig = Field(default_factory=ClientBookConfig)
     pairs: dict[str, PairConfig]
+    # Half the interbank bid/offer the dealer pays to cover, by liquidity tier (one-sided bps).
+    cover_half_spread_bps: dict[LiquidityTier, NonNegative]
     segments: dict[SegmentName, SegmentConfig]
     ticket_bands: list[TicketBand]
     volume_tiers: list[VolumeTier]
@@ -181,6 +186,23 @@ class GeneratorConfig(_Model):
                 raise ValueError(
                     f"pair {pair!r} is not EUR plus one of the ECB currencies: "
                     f"{', '.join(CURRENCIES)}"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _check_cover_half_spread(self) -> Self:
+        spread = self.cover_half_spread_bps
+        missing = [tier for tier in LIQUIDITY_TIERS if tier not in spread]
+        if missing:
+            raise ValueError(
+                f"cover_half_spread_bps is missing liquidity tiers: {', '.join(missing)}"
+            )
+        # The interbank touch widens as liquidity thins: g10_major <= g10_minor <= cee <= em.
+        for tighter, wider in zip(LIQUIDITY_TIERS, LIQUIDITY_TIERS[1:], strict=False):
+            if spread[tighter] > spread[wider]:
+                raise ValueError(
+                    f"cover_half_spread_bps must not narrow as liquidity thins: {tighter} "
+                    f"({spread[tighter]:g}) is wider than {wider} ({spread[wider]:g})"
                 )
         return self
 

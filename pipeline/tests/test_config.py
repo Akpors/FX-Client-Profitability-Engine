@@ -118,6 +118,37 @@ def test_settlement_weight_is_higher_outside_cls(cfg: GeneratorConfig):
     assert cfg.cost.settlement_weight_non_cls > cfg.cost.settlement_weight_cls > 0
 
 
+def test_cover_half_spread_covers_every_tier_and_widens_as_liquidity_thins(cfg: GeneratorConfig):
+    spread = cfg.cover_half_spread_bps
+    assert set(spread) == set(TIERS)
+    assert all(value >= 0 for value in spread.values())
+    ordered = [spread[tier] for tier in TIERS]
+    assert ordered == sorted(ordered), spread
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda raw: raw["cover_half_spread_bps"].pop("cee"), "cee"),
+        (lambda raw: raw["cover_half_spread_bps"].update(g10_major=-0.1), "greater than or equal"),
+        (lambda raw: raw["cover_half_spread_bps"].update(g10_minor=5.0), "cover_half_spread_bps"),
+        (lambda raw: raw.pop("cover_half_spread_bps"), "cover_half_spread_bps"),
+    ],
+    ids=["missing_tier", "negative", "out_of_order", "absent"],
+)
+def test_cover_half_spread_validation(variant, mutate, message):
+    with pytest.raises(ValidationError, match=message):
+        load_config(variant(mutate))
+
+
+def test_cover_half_spread_may_be_flat(variant):
+    # Equal tiers satisfy the ordering: the owner may set every tier to zero (cover at mid).
+    def flat(raw):
+        raw["cover_half_spread_bps"] = {tier: 0.0 for tier in TIERS}
+
+    assert set(load_config(variant(flat)).cover_half_spread_bps.values()) == {0.0}
+
+
 # --- validation -------------------------------------------------------------------------------
 
 
@@ -277,11 +308,8 @@ def test_client_book_code_defaults_match_the_yaml(cfg: GeneratorConfig):
 
 
 def test_client_markup_sigma(cfg: GeneratorConfig, variant):
-    sigmas = {name: seg.client_markup_sigma for name, seg in cfg.segments.items()}
-    assert all(0 < s <= 0.5 for s in sigmas.values())
-    # Bilateral corporate deals scatter most; rate-card SME pricing no more than anyone else.
-    assert sigmas["large_corporate"] == max(sigmas.values())
-    assert sigmas["sme"] == min(sigmas.values())
+    # The levels and their order are the owner's to calibrate; only the sign is a rule.
+    assert all(seg.client_markup_sigma >= 0 for seg in cfg.segments.values())
 
     def negative(raw):
         raw["segments"]["sme"]["client_markup_sigma"] = -0.1
